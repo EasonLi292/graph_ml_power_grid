@@ -108,9 +108,10 @@ def write_dataset(out_path: Path, splits: dict[str, tuple], ranges: ParamRanges,
         )
         f.attrs["sim_config"] = json.dumps(
             {
-                "n_periods": cfg.n_periods,
                 "steps_per_period": cfg.steps_per_period,
-                "warmup_periods": cfg.warmup_periods,
+                "measure_periods": cfg.measure_periods,
+                "min_warmup_periods": cfg.min_warmup_periods,
+                "settling_tau_factor": cfg.settling_tau_factor,
                 "Vdd": cfg.Vdd,
                 "phase": cfg.phase,
             }

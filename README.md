@@ -50,7 +50,7 @@ Topology stays fixed; seven scalar parameters vary per sample, drawn via Latin H
 | `freq`     | 200 MHz – 4 GHz  | log-uniform |
 | `duty`     | 0.2 – 0.6        | uniform     |
 
-`Vdd = 1 V` and `phase = 0` are fixed (phase doesn't affect periodic-steady-state peak droop). Per-sample sim: 10 periods × 100 steps/period; the first 2 periods are dropped as warm-up before computing peak droop.
+`Vdd = 1 V` and `phase = 0` are fixed (phase doesn't affect periodic-steady-state peak droop). Per-sample sim: warmup of `max(2 periods, ceil(5·R_bot·C_decap / period))` periods so the initial-condition transient is ≲1% residual regardless of the freq/RC ratio, then 8 measurement periods × 100 steps/period; peak droop is taken over the measurement window.
 
 Default split: 8000 / 1000 / 1000 train/val/test, seeded independently. An optional `--n-extrapolation` flag draws from `EXTRAPOLATION_RANGES` (parameter ranges shifted just outside the training box) — off by default. Targets stored per sample:
 

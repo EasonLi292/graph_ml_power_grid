@@ -1,7 +1,9 @@
 """Drive transient sims for an LHS batch and write per-split HDF5 datasets.
 
-Each sample's simulation step count is fixed at 10 periods × 100 steps/period;
-the first 2 periods are dropped as warm-up before computing peak droop.
+Per-sample warmup length is set by the grid's slowest time constant
+(``R_bot × C_decap``) rather than by a fixed number of periods. After the
+warmup window the load runs for ``measure_periods`` periods at 100
+steps/period; peak droop is taken over that window.
 """
 from __future__ import annotations
 
@@ -15,18 +17,33 @@ from .grid_construction import build_regular_pdn
 from .transient_solver import simulate
 
 
-N_PERIODS = 10
 STEPS_PER_PERIOD = 100
-WARMUP_PERIODS = 2
+MEASURE_PERIODS = 8
+MIN_WARMUP_PERIODS = 2
+SETTLING_TAU_FACTOR = 5.0  # 5τ ⇒ ≲1% residual on the initial-condition transient
 
 
 @dataclass
 class SimConfig:
-    n_periods: int = N_PERIODS
     steps_per_period: int = STEPS_PER_PERIOD
-    warmup_periods: int = WARMUP_PERIODS
+    measure_periods: int = MEASURE_PERIODS
+    min_warmup_periods: int = MIN_WARMUP_PERIODS
+    settling_tau_factor: float = SETTLING_TAU_FACTOR
     Vdd: float = 1.0
     phase: float = 0.0
+
+
+def _warmup_periods(p: dict[str, float], cfg: SimConfig) -> int:
+    """Warmup periods s.t. warmup ≥ settling_tau_factor × τ_grid.
+
+    τ_grid is the slowest RC mode that matters for droop: a decap charging
+    through the bottom mesh, ``R_bot × C_decap``. (R_top and R_via are
+    smaller, so this is conservative.)
+    """
+    period = 1.0 / p["freq"]
+    tau = p["R_bot"] * p["C_decap"]
+    n_from_tau = int(np.ceil(cfg.settling_tau_factor * tau / period))
+    return max(cfg.min_warmup_periods, n_from_tau)
 
 
 def run_one(p: dict[str, float], keep_full_traj: bool = False, cfg: SimConfig | None = None) -> dict:
@@ -34,7 +51,10 @@ def run_one(p: dict[str, float], keep_full_traj: bool = False, cfg: SimConfig | 
     cfg = cfg or SimConfig()
     period = 1.0 / p["freq"]
     dt = period / cfg.steps_per_period
-    t_end = period * cfg.n_periods
+
+    warmup_periods = _warmup_periods(p, cfg)
+    n_periods = warmup_periods + cfg.measure_periods
+    t_end = period * n_periods
 
     g = build_regular_pdn(
         Vdd=cfg.Vdd,
@@ -49,8 +69,7 @@ def run_one(p: dict[str, float], keep_full_traj: bool = False, cfg: SimConfig | 
     )
     res = simulate(g, t_end=t_end, dt=dt)
 
-    n_steps = res["t"].size
-    warmup = int(round(n_steps * (cfg.warmup_periods / cfg.n_periods)))
+    warmup = warmup_periods * cfg.steps_per_period
     V_bot_ss = res["V_bot"][warmup:]
     V_top_ss = res["V_top"][warmup:]
 
