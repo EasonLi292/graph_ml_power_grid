@@ -24,7 +24,8 @@ import torch.nn.functional as F
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import HeteroConv, MessagePassing
 
-from .sampler import DEFAULT_RANGES, ParamRanges
+from .grid_construction import build_regular_pdn
+from .sampler import DEFAULT_RANGES, ParamRanges, derived_R_ranges
 
 
 # ----- node / edge type constants (kept in one place) -----
@@ -58,20 +59,42 @@ EDGES_WITH_SCALAR = {
 # ----- input normalization -----
 
 class InputNormalizer(nn.Module):
-    """Normalizes load.x and edge_attr using a priori parameter range stats."""
+    """Normalizes load.x and edge_attr using a priori parameter range stats.
+
+    Sampled-param stats (``Rsheet_top``, ``wire_width``, ``I_peak``, ...)
+    come straight from ``ranges``. Edge attributes the model actually sees
+    are the derived per-segment resistances ``R_top`` / ``R_bot``; we
+    register stats for those analytically from
+    ``derived_R_ranges(ranges, pitch_top, pitch_bot)``.
+    """
 
     def __init__(self, ranges: ParamRanges = DEFAULT_RANGES) -> None:
         super().__init__()
-        for p in ranges.params:
-            if p.scale == "log":
-                lo, hi = math.log10(p.lo), math.log10(p.hi)
+        log_params: set[str] = set()
+
+        def _register(name: str, lo: float, hi: float, scale: str) -> None:
+            if scale == "log":
+                lo_t, hi_t = math.log10(lo), math.log10(hi)
+                log_params.add(name)
             else:
-                lo, hi = p.lo, p.hi
-            mu = 0.5 * (lo + hi)
-            sigma = (hi - lo) / math.sqrt(12) + 1e-8
-            self.register_buffer(f"mu_{p.name}", torch.tensor(mu, dtype=torch.float32))
-            self.register_buffer(f"sigma_{p.name}", torch.tensor(sigma, dtype=torch.float32))
-        self._log_params = {p.name for p in ranges.params if p.scale == "log"}
+                lo_t, hi_t = lo, hi
+            mu = 0.5 * (lo_t + hi_t)
+            sigma = (hi_t - lo_t) / math.sqrt(12) + 1e-8
+            self.register_buffer(f"mu_{name}", torch.tensor(mu, dtype=torch.float32))
+            self.register_buffer(f"sigma_{name}", torch.tensor(sigma, dtype=torch.float32))
+
+        for p in ranges.params:
+            _register(p.name, p.lo, p.hi, p.scale)
+
+        # Derived per-segment R_top / R_bot for the canonical topology.
+        # Pad pattern doesn't affect pitch, only pad placement.
+        proto = build_regular_pdn()
+        for name, (lo, hi, scale) in derived_R_ranges(
+            ranges, proto.pitch_top, proto.pitch_bot
+        ).items():
+            _register(name, lo, hi, scale)
+
+        self._log_params = log_params
 
     def _norm_scalar(self, x: torch.Tensor, name: str) -> torch.Tensor:
         if name in self._log_params:
@@ -81,12 +104,16 @@ class InputNormalizer(nn.Module):
         return (x - mu) / sigma
 
     def normalize_load(self, load_x: torch.Tensor) -> torch.Tensor:
-        # load_x: [N, 4] = (I_peak, freq, duty, phase)
+        # load_x: [N, 4] = (I_peak, freq, duty, phase ∈ [0, 1])
+        # Output: [N, 5] — phase encoded as (sin 2πφ, cos 2πφ) so the model
+        # gets the natural circular continuity (φ=0 ≡ φ=1) for free.
         I = self._norm_scalar(load_x[:, 0:1], "I_peak")
         f = self._norm_scalar(load_x[:, 1:2], "freq")
         d = self._norm_scalar(load_x[:, 2:3], "duty")
-        ph = load_x[:, 3:4]  # already in [0, 1]
-        return torch.cat([I, f, d, ph], dim=1)
+        ph = load_x[:, 3:4]
+        sin_ph = torch.sin(2 * math.pi * ph)
+        cos_ph = torch.cos(2 * math.pi * ph)
+        return torch.cat([I, f, d, sin_ph, cos_ph], dim=1)
 
     def normalize_edge_attr(self, attr: torch.Tensor, name: str) -> torch.Tensor:
         return self._norm_scalar(attr, name)
@@ -138,7 +165,7 @@ class EncoderConfig:
 class PDNEncoder(nn.Module):
     """3-layer heterogeneous GNN backbone over the canonical PDN topology."""
 
-    NODE_IN_DIM = {"mesh_top": 3, "mesh_bot": 2, "load": 4, "gnd": 1}
+    NODE_IN_DIM = {"mesh_top": 3, "mesh_bot": 2, "load": 5, "gnd": 1}
 
     def __init__(
         self,
