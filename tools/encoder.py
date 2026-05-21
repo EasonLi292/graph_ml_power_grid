@@ -24,36 +24,38 @@ import torch.nn.functional as F
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import HeteroConv, MessagePassing
 
-from .grid_construction import build_regular_pdn
+from .grid_construction import (
+    EDGE_ATTR_COLS,
+    EDGE_ATTR_DIM,
+    NODE_FEATURE_DIM,
+    build_regular_pdn,
+)
 from .sampler import DEFAULT_RANGES, ParamRanges, derived_R_ranges
 
 
 # ----- node / edge type constants (kept in one place) -----
 
-NODE_TYPES = ("mesh_top", "mesh_bot", "load", "gnd")
+NODE_TYPES = ("mesh_top", "mesh_bot", "gnd")
 
+# Five logical bidirectional relations: strap (within mesh_top), strap
+# (within mesh_bot), via (across types), decap (across types), load
+# (across types). Same-type bidir lives in one relation with edge_index
+# packed; cross-type bidir is expressed as two PyG relations sharing the
+# same relation name.
 EDGE_TYPES = (
-    ("mesh_top", "R_top", "mesh_top"),
-    ("mesh_bot", "R_bot", "mesh_bot"),
-    ("mesh_top", "R_via", "mesh_bot"),
-    ("mesh_bot", "R_via", "mesh_top"),
-    ("mesh_bot", "C_decap", "gnd"),
-    ("gnd", "C_decap_rev", "mesh_bot"),
-    ("mesh_bot", "I_in", "load"),
-    ("load", "I_in_rev", "mesh_bot"),
-    ("load", "I_out", "gnd"),
-    ("gnd", "I_out_rev", "load"),
+    ("mesh_top", "strap", "mesh_top"),
+    ("mesh_bot", "strap", "mesh_bot"),
+    ("mesh_top", "via", "mesh_bot"),
+    ("mesh_bot", "via", "mesh_top"),
+    ("mesh_bot", "decap", "gnd"),
+    ("gnd", "decap", "mesh_bot"),
+    ("mesh_bot", "load", "gnd"),
+    ("gnd", "load", "mesh_bot"),
 )
 
-# Edges with a physical scalar (rest are "wire" edges with no edge_attr in the dataset).
-EDGES_WITH_SCALAR = {
-    ("mesh_top", "R_top", "mesh_top"): "R_top",
-    ("mesh_bot", "R_bot", "mesh_bot"): "R_bot",
-    ("mesh_top", "R_via", "mesh_bot"): "R_via",
-    ("mesh_bot", "R_via", "mesh_top"): "R_via",
-    ("mesh_bot", "C_decap", "gnd"): "C_decap",
-    ("gnd", "C_decap_rev", "mesh_bot"): "C_decap",
-}
+# Normalized edge-attribute dimension: 6 raw columns
+# [R, C, I_peak, freq, duty, phase] become 7 after phase → (sin, cos).
+EDGE_ATTR_DIM_NORMALIZED = EDGE_ATTR_DIM + 1
 
 
 # ----- input normalization -----
@@ -103,20 +105,44 @@ class InputNormalizer(nn.Module):
         sigma = getattr(self, f"sigma_{name}")
         return (x - mu) / sigma
 
-    def normalize_load(self, load_x: torch.Tensor) -> torch.Tensor:
-        # load_x: [N, 4] = (I_peak, freq, duty, phase ∈ [0, 1])
-        # Output: [N, 5] — phase encoded as (sin 2πφ, cos 2πφ) so the model
-        # gets the natural circular continuity (φ=0 ≡ φ=1) for free.
-        I = self._norm_scalar(load_x[:, 0:1], "I_peak")
-        f = self._norm_scalar(load_x[:, 1:2], "freq")
-        d = self._norm_scalar(load_x[:, 2:3], "duty")
-        ph = load_x[:, 3:4]
-        sin_ph = torch.sin(2 * math.pi * ph)
-        cos_ph = torch.cos(2 * math.pi * ph)
-        return torch.cat([I, f, d, sin_ph, cos_ph], dim=1)
+    def normalize_edge_attr(
+        self, attr: torch.Tensor, relation: tuple[str, str, str]
+    ) -> torch.Tensor:
+        """Normalize a 6-dim raw edge attribute to 7-dim.
 
-    def normalize_edge_attr(self, attr: torch.Tensor, name: str) -> torch.Tensor:
-        return self._norm_scalar(attr, name)
+        Layout in: ``[R, C, I_peak, freq, duty, phase]``.
+        Layout out: ``[R_n, C_n, I_n, f_n, d_n, sin 2πφ, cos 2πφ]``.
+
+        Each relation only populates the columns relevant to its physical
+        role; the rest stay zero. For load edges, phase becomes the usual
+        circular (sin, cos) encoding so φ=0 ≡ φ=1.
+
+        For resistor edges, the R column uses a relation-specific stat:
+        top-strap → ``R_top`` (derived range), bot-strap → ``R_bot``
+        (derived range), via → ``R_via`` (sampled range).
+        """
+        E = attr.shape[0]
+        out = torch.zeros((E, EDGE_ATTR_DIM_NORMALIZED), device=attr.device, dtype=attr.dtype)
+        rel_name = relation[1]
+
+        if rel_name == "strap":
+            stat = "R_top" if relation[0] == "mesh_top" else "R_bot"
+            out[:, 0:1] = self._norm_scalar(attr[:, 0:1], stat)
+        elif rel_name == "via":
+            out[:, 0:1] = self._norm_scalar(attr[:, 0:1], "R_via")
+        elif rel_name == "decap":
+            out[:, 1:2] = self._norm_scalar(attr[:, 1:2], "C_decap")
+        elif rel_name == "load":
+            out[:, 2:3] = self._norm_scalar(attr[:, 2:3], "I_peak")
+            out[:, 3:4] = self._norm_scalar(attr[:, 3:4], "freq")
+            out[:, 4:5] = self._norm_scalar(attr[:, 4:5], "duty")
+            ph = attr[:, 5:6]
+            out[:, 5:6] = torch.sin(2 * math.pi * ph)
+            out[:, 6:7] = torch.cos(2 * math.pi * ph)
+        else:
+            raise ValueError(f"unknown relation: {relation!r}")
+
+        return out
 
 
 # ----- conv -----
@@ -163,9 +189,20 @@ class EncoderConfig:
 
 
 class PDNEncoder(nn.Module):
-    """3-layer heterogeneous GNN backbone over the canonical PDN topology."""
+    """Heterogeneous GNN backbone over the redesigned PDN graph.
 
-    NODE_IN_DIM = {"mesh_top": 3, "mesh_bot": 2, "load": 5, "gnd": 1}
+    Node features are uniform 6-dim ``[one_hot_type(3), payload(3)]``. The
+    explicit type signal in the input means message passing can never
+    "forget" what kind of node it's processing, even though we still keep
+    per-node-type ``Linear`` projections for inductive bias.
+
+    Edge features are uniform 7-dim after normalization (the raw 6-dim
+    ``[R, C, I_peak, freq, duty, phase]`` with phase replaced by
+    ``(sin 2πφ, cos 2πφ)``). Per-relation ``Linear`` projects to the
+    hidden dim.
+    """
+
+    NODE_IN_DIM = {nt: NODE_FEATURE_DIM for nt in NODE_TYPES}
 
     def __init__(
         self,
@@ -182,10 +219,9 @@ class PDNEncoder(nn.Module):
             {nt: nn.Linear(self.NODE_IN_DIM[nt], h) for nt in NODE_TYPES}
         )
 
-        # One projection per edge type (edge_attr is a single scalar — either the
-        # physical R/C value, or a placeholder constant for wire edges).
+        # Per-relation projection from the 7-dim normalized edge attribute.
         self.edge_proj = nn.ModuleDict(
-            {self._et_key(et): nn.Linear(1, h) for et in EDGE_TYPES}
+            {self._et_key(et): nn.Linear(EDGE_ATTR_DIM_NORMALIZED, h) for et in EDGE_TYPES}
         )
 
         self.convs = nn.ModuleList(
@@ -211,30 +247,14 @@ class PDNEncoder(nn.Module):
 
     def _build_edge_attr_dict(self, data: HeteroData) -> dict:
         out = {}
-        device = data["mesh_bot"].x.device
         for et in EDGE_TYPES:
-            if et in EDGES_WITH_SCALAR:
-                scalar_name = EDGES_WITH_SCALAR[et]
-                raw = data[et].edge_attr  # [E, 1]
-                normed = self.normalizer.normalize_edge_attr(raw, scalar_name)
-            else:
-                # Wire edges (I_in, I_out): give them a constant 1, the per-edge
-                # Linear lets the model learn a relation-specific bias.
-                num_edges = data[et].edge_index.shape[1]
-                normed = torch.ones((num_edges, 1), device=device)
+            raw = data[et].edge_attr  # [E, EDGE_ATTR_DIM]
+            normed = self.normalizer.normalize_edge_attr(raw, et)
             out[et] = self.edge_proj[self._et_key(et)](normed)
         return out
 
     def forward(self, data: HeteroData) -> dict[str, torch.Tensor]:
-        # Per-node-type input projection (with normalization on load.x)
-        x_dict = {
-            "mesh_top": data["mesh_top"].x,
-            "mesh_bot": data["mesh_bot"].x,
-            "load": self.normalizer.normalize_load(data["load"].x),
-            "gnd": data["gnd"].x,
-        }
-        x_dict = {nt: self.node_proj[nt](x) for nt, x in x_dict.items()}
-
+        x_dict = {nt: self.node_proj[nt](data[nt].x) for nt in NODE_TYPES}
         edge_attr_dict = self._build_edge_attr_dict(data)
 
         for conv, norm in zip(self.convs, self.norms):

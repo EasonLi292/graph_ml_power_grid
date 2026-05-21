@@ -4,9 +4,12 @@ For every sample we look up the right ``HeteroData`` template by
 ``pad_pattern_idx`` (one template per pad pattern, cached at init),
 clone, then fill in:
 
-* edge_attr for ``R_top`` / ``R_bot`` / ``R_via`` / ``C_decap``, derived
-  from the sample's global params (``R_top = Rsheet × pitch / width``);
-* ``load.x`` from the per-load slice of ``load_x`` (first ``n_loads`` rows);
+* strap edge ``R`` columns (top, bot) — derived from the sample's global
+  ``Rsheet_*`` × ``pitch / wire_width``;
+* via edge ``R`` column = ``R_via``;
+* decap edge ``C`` column = ``C_decap``;
+* load edge ``(I_peak, freq, duty, phase)`` columns — copied from the
+  per-load slice of ``load_x`` (first ``n_loads`` rows);
 * ``mesh_bot.y`` from the chosen droop target (``peak`` or ``static``).
 """
 from __future__ import annotations
@@ -18,7 +21,13 @@ from typing import Literal
 import h5py
 import numpy as np
 
-from .grid_construction import PAD_PATTERNS, build_regular_pdn, to_hetero_data
+from .grid_construction import (
+    EDGE_ATTR_COLS,
+    EDGE_ATTR_DIM,
+    PAD_PATTERNS,
+    build_regular_pdn,
+    to_hetero_data,
+)
 
 
 Target = Literal["linear", "log"]
@@ -93,6 +102,14 @@ class RegularPDNDataset:
     def __len__(self) -> int:
         return self._global.shape[0]
 
+    # Column indices into the 6-dim edge attribute, cached for speed.
+    _R_COL = EDGE_ATTR_COLS.index("R")
+    _C_COL = EDGE_ATTR_COLS.index("C")
+    _I_COL = EDGE_ATTR_COLS.index("I_peak")
+    _F_COL = EDGE_ATTR_COLS.index("freq")
+    _D_COL = EDGE_ATTR_COLS.index("duty")
+    _P_COL = EDGE_ATTR_COLS.index("phase")
+
     def __getitem__(self, idx: int):
         import torch
 
@@ -105,15 +122,26 @@ class RegularPDNDataset:
         R_top = Rsheet_top * (self._pitch_top / wire_width)
         R_bot = Rsheet_bot * (self._pitch_bot / wire_width)
 
-        data["mesh_top", "R_top", "mesh_top"].edge_attr.fill_(R_top)
-        data["mesh_bot", "R_bot", "mesh_bot"].edge_attr.fill_(R_bot)
-        data["mesh_top", "R_via", "mesh_bot"].edge_attr.fill_(R_via)
-        data["mesh_bot", "R_via", "mesh_top"].edge_attr.fill_(R_via)
-        data["mesh_bot", "C_decap", "gnd"].edge_attr.fill_(C_decap)
-        data["gnd", "C_decap_rev", "mesh_bot"].edge_attr.fill_(C_decap)
+        # strap and via: write only the R column.
+        data["mesh_top", "strap", "mesh_top"].edge_attr[:, self._R_COL] = R_top
+        data["mesh_bot", "strap", "mesh_bot"].edge_attr[:, self._R_COL] = R_bot
+        data["mesh_top", "via", "mesh_bot"].edge_attr[:, self._R_COL] = R_via
+        data["mesh_bot", "via", "mesh_top"].edge_attr[:, self._R_COL] = R_via
 
+        # decap: write only the C column.
+        data["mesh_bot", "decap", "gnd"].edge_attr[:, self._C_COL] = C_decap
+        data["gnd", "decap", "mesh_bot"].edge_attr[:, self._C_COL] = C_decap
+
+        # load: replace the I/freq/duty/phase columns with per-edge values.
         n_loads = int(self._n_loads[idx])
-        data["load"].x = torch.from_numpy(self._load_x[idx, :n_loads, :].astype(np.float32))
+        load_attr = torch.zeros((n_loads, EDGE_ATTR_DIM), dtype=torch.float32)
+        load_slice = torch.from_numpy(self._load_x[idx, :n_loads, :].astype(np.float32))
+        load_attr[:, self._I_COL] = load_slice[:, 0]
+        load_attr[:, self._F_COL] = load_slice[:, 1]
+        load_attr[:, self._D_COL] = load_slice[:, 2]
+        load_attr[:, self._P_COL] = load_slice[:, 3]
+        data["mesh_bot", "load", "gnd"].edge_attr = load_attr
+        data["gnd", "load", "mesh_bot"].edge_attr = load_attr.clone()
 
         droop = self._target_y[idx]
         if self.target == "log":

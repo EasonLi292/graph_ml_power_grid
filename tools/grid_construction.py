@@ -288,83 +288,141 @@ def build_regular_pdn(
     )
 
 
+# Edge attribute layout, shared across every relation:
+#   col 0 — R (resistance, Ω) — non-zero for strap and via edges
+#   col 1 — C (capacitance, F) — non-zero for decap edges
+#   col 2 — I_peak (A)        ┐
+#   col 3 — freq (Hz)         │
+#   col 4 — duty (fraction)   │ non-zero for load edges
+#   col 5 — phase (∈ [0, 1])  ┘
+EDGE_ATTR_DIM = 6
+EDGE_ATTR_COLS = ("R", "C", "I_peak", "freq", "duty", "phase")
+
+# Node feature layout: [one_hot(node_type, 3), payload(3)] → uniform 6-dim,
+# so the node-type signal survives the input projection (no per-type Linear
+# can erase it).
+NODE_FEATURE_DIM = 6
+NODE_TYPE_IDX = {"mesh_top": 0, "mesh_bot": 1, "gnd": 2}
+
+
 def to_hetero_data(g: PDNGraph):
     """Convert a ``PDNGraph`` to a ``torch_geometric.data.HeteroData``.
 
-    Resistor edges are emitted bidirectionally so the encoder can pass
-    messages along straps in either direction; capacitor and load edges
-    are directed (gnd is always the sink).
+    Three node types (``mesh_top``, ``mesh_bot``, ``gnd``). Loads are
+    encoded as edges between ``mesh_bot`` and ``gnd``, not as nodes — the
+    load is electrically a two-terminal element, so it belongs on an edge.
+
+    Five logical bidirectional relations, all carrying the same 6-dim
+    edge attribute schema ``EDGE_ATTR_COLS``::
+
+        mesh_top ↔ mesh_top   strap  (R only)
+        mesh_bot ↔ mesh_bot   strap  (R only)
+        mesh_top ↔ mesh_bot   via    (R only)
+        mesh_bot ↔ gnd        decap  (C only)
+        mesh_bot ↔ gnd        load   (I_peak, freq, duty, phase)
+
+    Cross-type bidirectionality is expressed as two PyG relations sharing
+    the same relation name (e.g. ``("mesh_top", "via", "mesh_bot")`` and
+    ``("mesh_bot", "via", "mesh_top")``); same-type bidirectionality is a
+    single relation with both directions packed into ``edge_index``.
+
+    The load edge is a *current source*, not a resistor — its attribute
+    encodes the time-varying current draw. Solver-side, this is stamped
+    as an injection at the ``mesh_bot`` attachment node, with the return
+    closing through ``gnd``.
     """
     import torch
     from torch_geometric.data import HeteroData
 
     data = HeteroData()
 
-    # ----- nodes -----
-    is_pad = np.zeros(g.n_top_nodes, dtype=np.float32)
-    is_pad[g.vdd_pad_top_idx] = 1.0
-    data["mesh_top"].x = torch.from_numpy(
-        np.column_stack([g.top_pos.astype(np.float32), is_pad])
+    # ----- nodes (uniform 6-dim feature: [one_hot(3), payload(3)]) -----
+    def _node_features(node_type: str, payload: np.ndarray) -> np.ndarray:
+        n = payload.shape[0]
+        one_hot = np.zeros((n, 3), dtype=np.float32)
+        one_hot[:, NODE_TYPE_IDX[node_type]] = 1.0
+        return np.column_stack([one_hot, payload.astype(np.float32)])
+
+    is_pad = np.zeros((g.n_top_nodes, 1), dtype=np.float32)
+    is_pad[g.vdd_pad_top_idx, 0] = 1.0
+    top_payload = np.column_stack([g.top_pos.astype(np.float32), is_pad])  # [n_top, 3]
+    data["mesh_top"].x = torch.from_numpy(_node_features("mesh_top", top_payload))
+
+    bot_payload = np.column_stack([
+        g.bot_pos.astype(np.float32),
+        np.zeros((g.n_bot_nodes, 1), dtype=np.float32),
+    ])  # [n_bot, 3]
+    data["mesh_bot"].x = torch.from_numpy(_node_features("mesh_bot", bot_payload))
+
+    data["gnd"].x = torch.from_numpy(
+        _node_features("gnd", np.zeros((1, 3), dtype=np.float32))
     )
-    data["mesh_bot"].x = torch.from_numpy(g.bot_pos.astype(np.float32))
-    data["load"].x = torch.from_numpy(g.loads.astype(np.float32))
-    data["gnd"].x = torch.zeros((1, 1), dtype=torch.float32)
 
-    def _bidir(edges: np.ndarray, value: float):
+    # ----- edge helpers -----
+    def _const_attr(n: int, **kwargs) -> np.ndarray:
+        """6-dim edge attribute with named columns set, rest zero."""
+        a = np.zeros((n, EDGE_ATTR_DIM), dtype=np.float32)
+        for k, v in kwargs.items():
+            a[:, EDGE_ATTR_COLS.index(k)] = v
+        return a
+
+    def _load_attr(loads: np.ndarray) -> np.ndarray:
+        """Per-edge attribute for the load relation; ``loads`` is
+        ``[n_loads, 4]`` = (I_peak, freq, duty, phase)."""
+        a = np.zeros((loads.shape[0], EDGE_ATTR_DIM), dtype=np.float32)
+        a[:, EDGE_ATTR_COLS.index("I_peak")] = loads[:, 0]
+        a[:, EDGE_ATTR_COLS.index("freq")] = loads[:, 1]
+        a[:, EDGE_ATTR_COLS.index("duty")] = loads[:, 2]
+        a[:, EDGE_ATTR_COLS.index("phase")] = loads[:, 3]
+        return a
+
+    def _bidir_same_type(edges: np.ndarray) -> np.ndarray:
         u, v = edges[:, 0], edges[:, 1]
-        ei = np.stack([np.concatenate([u, v]), np.concatenate([v, u])], axis=0)
-        ea = np.full((ei.shape[1], 1), value, dtype=np.float32)
-        return torch.from_numpy(ei.astype(np.int64)), torch.from_numpy(ea)
+        return np.stack([np.concatenate([u, v]), np.concatenate([v, u])], axis=0)
 
-    ei, ea = _bidir(g.top_edges, g.R_top)
-    data["mesh_top", "R_top", "mesh_top"].edge_index = ei
-    data["mesh_top", "R_top", "mesh_top"].edge_attr = ea
+    # ----- strap edges (same-type bidir packed into a single edge_index) -----
+    ei_top = _bidir_same_type(g.top_edges).astype(np.int64)
+    data["mesh_top", "strap", "mesh_top"].edge_index = torch.from_numpy(ei_top)
+    data["mesh_top", "strap", "mesh_top"].edge_attr = torch.from_numpy(
+        _const_attr(ei_top.shape[1], R=g.R_top)
+    )
 
-    ei, ea = _bidir(g.bot_edges, g.R_bot)
-    data["mesh_bot", "R_bot", "mesh_bot"].edge_index = ei
-    data["mesh_bot", "R_bot", "mesh_bot"].edge_attr = ea
+    ei_bot = _bidir_same_type(g.bot_edges).astype(np.int64)
+    data["mesh_bot", "strap", "mesh_bot"].edge_index = torch.from_numpy(ei_bot)
+    data["mesh_bot", "strap", "mesh_bot"].edge_attr = torch.from_numpy(
+        _const_attr(ei_bot.shape[1], R=g.R_bot)
+    )
 
+    # ----- via edges (cross-type bidir → two relations sharing the "via" name) -----
     via_top = g.via_pairs[:, 0].astype(np.int64)
     via_bot = g.via_pairs[:, 1].astype(np.int64)
-    via_attr = torch.full((via_top.size, 1), g.R_via, dtype=torch.float32)
-    data["mesh_top", "R_via", "mesh_bot"].edge_index = torch.from_numpy(
-        np.stack([via_top, via_bot])
-    )
-    data["mesh_top", "R_via", "mesh_bot"].edge_attr = via_attr.clone()
-    data["mesh_bot", "R_via", "mesh_top"].edge_index = torch.from_numpy(
-        np.stack([via_bot, via_top])
-    )
-    data["mesh_bot", "R_via", "mesh_top"].edge_attr = via_attr.clone()
+    via_attr = _const_attr(via_top.size, R=g.R_via)
+    data["mesh_top", "via", "mesh_bot"].edge_index = torch.from_numpy(np.stack([via_top, via_bot]))
+    data["mesh_top", "via", "mesh_bot"].edge_attr = torch.from_numpy(via_attr.copy())
+    data["mesh_bot", "via", "mesh_top"].edge_index = torch.from_numpy(np.stack([via_bot, via_top]))
+    data["mesh_bot", "via", "mesh_top"].edge_attr = torch.from_numpy(via_attr.copy())
 
+    # ----- decap edges (cross-type bidir, "decap") -----
     decap_src = g.decap_attach_bot_idx.astype(np.int64)
     decap_dst = np.zeros_like(decap_src)
-    decap_attr = torch.full((decap_src.size, 1), g.C_decap, dtype=torch.float32)
-    data["mesh_bot", "C_decap", "gnd"].edge_index = torch.from_numpy(
-        np.stack([decap_src, decap_dst])
-    )
-    data["mesh_bot", "C_decap", "gnd"].edge_attr = decap_attr.clone()
-    # Reverse so mesh_bot also receives the C_decap signal — without this,
-    # mesh_bot has no path by which decap capacitance reaches its prediction.
-    data["gnd", "C_decap_rev", "mesh_bot"].edge_index = torch.from_numpy(
-        np.stack([decap_dst, decap_src])
-    )
-    data["gnd", "C_decap_rev", "mesh_bot"].edge_attr = decap_attr.clone()
+    decap_attr = _const_attr(decap_src.size, C=g.C_decap)
+    data["mesh_bot", "decap", "gnd"].edge_index = torch.from_numpy(np.stack([decap_src, decap_dst]))
+    data["mesh_bot", "decap", "gnd"].edge_attr = torch.from_numpy(decap_attr.copy())
+    data["gnd", "decap", "mesh_bot"].edge_index = torch.from_numpy(np.stack([decap_dst, decap_src]))
+    data["gnd", "decap", "mesh_bot"].edge_attr = torch.from_numpy(decap_attr.copy())
 
-    load_ids = np.arange(g.n_loads, dtype=np.int64)
-    load_attach = g.load_attach_bot_idx.astype(np.int64)
-    data["mesh_bot", "I_in", "load"].edge_index = torch.from_numpy(
-        np.stack([load_attach, load_ids])
-    )
-    # Reverse so load.x (I_peak, freq, duty, phase) propagates to mesh_bot.
-    data["load", "I_in_rev", "mesh_bot"].edge_index = torch.from_numpy(
-        np.stack([load_ids, load_attach])
-    )
-
-    data["load", "I_out", "gnd"].edge_index = torch.from_numpy(
-        np.stack([load_ids, np.zeros_like(load_ids)])
-    )
-    data["gnd", "I_out_rev", "load"].edge_index = torch.from_numpy(
-        np.stack([np.zeros_like(load_ids), load_ids])
-    )
+    # ----- load edges (cross-type bidir, "load"; per-edge attribute) -----
+    if g.n_loads > 0:
+        load_src = g.load_attach_bot_idx.astype(np.int64)
+        load_dst = np.zeros_like(load_src)
+        load_attr = _load_attr(g.loads.astype(np.float32))
+    else:
+        load_src = np.empty(0, dtype=np.int64)
+        load_dst = np.empty(0, dtype=np.int64)
+        load_attr = np.empty((0, EDGE_ATTR_DIM), dtype=np.float32)
+    data["mesh_bot", "load", "gnd"].edge_index = torch.from_numpy(np.stack([load_src, load_dst]))
+    data["mesh_bot", "load", "gnd"].edge_attr = torch.from_numpy(load_attr.copy())
+    data["gnd", "load", "mesh_bot"].edge_index = torch.from_numpy(np.stack([load_dst, load_src]))
+    data["gnd", "load", "mesh_bot"].edge_attr = torch.from_numpy(load_attr.copy())
 
     return data
