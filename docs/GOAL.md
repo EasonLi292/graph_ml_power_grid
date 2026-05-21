@@ -32,11 +32,11 @@ A regular PDN is a useful intermediate because:
   heterogeneous graph encoder, VAE latent split, a regression head, an
   autoregressive head for generation.
 
-The plan with Peng (2026-04-27 email) was explicitly to **keep the design
-parameter count small** — # metal tracks, total caps, wire width — and
-assume a regular grid; if the generation flow works here, that is the
-green light to scale up to transistor-level. If it doesn't, the iteration
-loop is much shorter than retooling for SPICE.
+The plan is explicitly to **keep the design parameter count small** —
+# metal tracks, total caps, wire width — and assume a regular grid; if
+the generation flow works here, that is the green light to scale up to
+transistor-level. If it doesn't, the iteration loop is much shorter than
+retooling for SPICE.
 
 ## Concretely, what counts as "this works"
 
@@ -68,7 +68,8 @@ porting to the transistor-level setting.
   add this only if the fixed-size results are good enough that high-freq
   fidelity becomes the next limiter.
 - **Irregular grids** (random strap drop-outs, non-uniform pitches).
-  Same reason — Peng explicitly asked for regular topology first.
+  Same reason — regular topology first, irregular only after the regular
+  case is validated.
 - **Real-design parsing** (DEF / LEF / industry benchmarks). Synthetic
   regular grids are enough to iterate on the model and the generation
   pipeline.

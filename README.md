@@ -13,28 +13,30 @@ As process nodes shrink and current densities climb, IR drop on the on-die power
 This project reuses the encoder/decoder VAE skeleton from [Z-GED](https://github.com/EasonLi292/Z-GED), retargeted from RLC filter synthesis to power-grid analysis.
 
 - **Encoder — impedance-aware GNN.** Three message-passing layers operating over the PDN graph. Nodes represent grid taps, vias, and instance pins; edges carry per-segment resistance (and inductance/capacitance for dynamic analysis). Hierarchical latent branches separate topology, per-segment electrical values, and load/source conditions, mirroring the Z-GED `[z_topology | z_values | z_pz]` split — here repurposed as `[z_topology | z_RLC | z_loads]`.
-- **Decoder — autoregressive transformer.** A GPT-style decoder (4 layers, 256 dims) that, depending on the head, either (a) reconstructs the PDN as an Eulerian walk over the grid for self-supervised pretraining, or (b) emits per-node voltage / IR-drop predictions conditioned on the latent code and the load vector.
-- **Training as a VAE.** The model is pretrained as a variational autoencoder on PDN graphs so that the latent space captures grid topology and impedance structure. A supervised head is then fine-tuned against ground-truth SPICE / signoff IR-drop solutions.
+- **Decoder (planned) — autoregressive transformer.** A GPT-style decoder that, depending on the head, either (a) reconstructs the PDN as an Eulerian walk over the grid for self-supervised pretraining, or (b) emits per-node voltage / IR-drop predictions conditioned on the latent code and the load configuration. Not yet implemented — only the encoder + regression head currently exist.
+- **Training as a VAE (planned).** The model is to be pretrained as a variational autoencoder on PDN graphs so that the latent space captures grid topology and impedance structure, with a supervised head then fine-tuned against the MNA-solver ground truth. Currently only the supervised regression head is wired up.
 
 ## Graph representation
 
-A PDN is encoded as a heterogeneous graph with four node types and six edge types. Voltages are predicted per node; lumped R/C live on edges; load waveforms live on nodes.
+A PDN is encoded as a heterogeneous graph with three node types and five logical bidirectional edge relations. **All electrical elements live on edges** — including the load, which is a two-terminal current source between a `mesh_bot` node and `gnd`. Voltages are predicted per `mesh_bot` node.
 
-**Node types**
-- `mesh_top` — junction on the coarse top metal layer (M_top). Corners flagged `is_vdd_pad` carry a Dirichlet condition V = Vdd.
-- `mesh_bot` — junction on the fine bottom metal layer (M_bot).
-- `load` — current source. Features: `(I_peak, freq, duty, phase)` of a square-wave current draw.
-- `gnd` — single ideal-zero reference node.
+**Node types** — uniform 6-dim feature `[one_hot_type(3), payload(3)]`. The type one-hot is part of the feature itself (not just an implicit signal carried by per-type weights), so message passing can't forget what kind of node it's looking at.
 
-**Edge types** (each carries one scalar feature)
-- `R_seg_top` — strap segment between adjacent `mesh_top` nodes (Ω).
-- `R_seg_bot` — strap segment between adjacent `mesh_bot` nodes (Ω).
-- `R_via` — via between co-located `mesh_top` and `mesh_bot` (Ω).
-- `C_decap` — decoupling capacitor between `mesh_bot` and `gnd` (F).
-- `I_in` — directed `mesh_bot → load`; current magnitude lives on the load node.
-- `I_out` — directed `load → gnd`; same magnitude as `I_in` (KCL closes through the load).
+- `mesh_top` — junction on the coarse top metal layer. Payload `(x, y, is_pad)`; `is_pad=1` carries a Dirichlet condition `V = Vdd` in the solver.
+- `mesh_bot` — junction on the fine bottom metal layer. Payload `(x, y, 0)`.
+- `gnd` — single ideal-zero reference node. Payload `(0, 0, 0)`.
 
-**Canonical regular instance** ([tools/grid_construction.py](tools/grid_construction.py), `build_regular_pdn`): 4×4 M_top stacked on 7×7 M_bot, vias at every M_top node aligned to even M_bot positions, two supply-pad patterns (`corner` = 4 corners only, `checker` = alternating M_top nodes), loads on the even M_bot sub-grid *minus* any node directly under a Vdd-pad via (so a load can never sit on an ideal supply tap), 9 decaps offset onto the odd sub-grid. Per-segment `R_top`, `R_bot` are derived from sheet resistance × pitch / wire width: `R_seg = Rsheet × (pitch / wire_width)`. Loads share `(I_peak, freq, duty, phase)` (single global clock, in-phase). The pad pattern is drawn uniformly per sample, exposing the model to two distinct supply geometries.
+**Edge relations**, all bidirectional, all carrying the same 6-dim attribute `[R, C, I_peak, freq, duty, phase]` (zero in columns not relevant to that element type):
+
+- `mesh_top ↔ mesh_top` strap — `R` column = derived top-segment resistance.
+- `mesh_bot ↔ mesh_bot` strap — `R` column = derived bot-segment resistance.
+- `mesh_top ↔ mesh_bot` via — `R` column = `R_via`.
+- `mesh_bot ↔ gnd` decap — `C` column = `C_decap`.
+- `mesh_bot ↔ gnd` load — `(I_peak, freq, duty, phase)` columns; per-edge values. **The load is a current source, not a resistor** — its current is dictated by switching activity, not by Ohm's law, so an `R_load = V/I` model would create a spurious voltage-current feedback under droop.
+
+Same-type bidirectionality (e.g. `mesh_top ↔ mesh_top`) is one PyG relation with both directions packed into `edge_index`. Cross-type bidirectionality (e.g. via, decap, load) is expressed as two PyG relations sharing the same relation name, since PyG keys relations by `(src_type, name, dst_type)`. In the normalizer, the raw 6-dim edge attribute is mapped to 7-dim by replacing `phase` with `(sin 2πφ, cos 2πφ)` for circular continuity on load edges.
+
+**Canonical regular instance** ([tools/grid_construction.py](tools/grid_construction.py), `build_regular_pdn`): 4×4 M_top stacked on 7×7 M_bot, vias at every M_top node aligned to even M_bot positions, four supply-pad patterns (`corner` 4 pads / `checker` 8 / `edge_strip` 12 / `distributed` 8 with corners + interior 2×2), loads on the even M_bot sub-grid *minus* any node directly under a Vdd-pad via (so a load can never sit on an ideal supply tap), 9 decaps offset onto the odd sub-grid. Per-segment `R_top`, `R_bot` are derived from sheet resistance × pitch / wire width: `R_seg = Rsheet × (pitch / wire_width)`. Each load draws its own `(I_peak, duty, phase)` independently — one shared clock `freq` per sample (single clock domain). The pad pattern is drawn uniformly per sample; three patterns are used for training and `distributed` is held out as an OOD topology probe.
 
 Ground truth: backward-Euler MNA transient simulation in [tools/transient_solver.py](tools/transient_solver.py). Smoke test: `python scripts/smoke_test.py` builds the canonical instance, runs a 5 ns / 10 ps transient, and prints peak droop per M_bot node.
 
@@ -101,10 +103,10 @@ python scripts/inspect_dataset.py datasets/regular_v2/dataset.h5
 
 [tools/encoder.py](tools/encoder.py) implements the heterogeneous GNN encoder and a droop-regression head:
 
-- `InputNormalizer` — log10 + z-score for log-scale params (R/C, I_peak, freq), plain z-score for linear params; statistics derived analytically from the parameter ranges so no fit-on-data is needed. Phase is encoded as `(sin 2πφ, cos 2πφ)` so `load.x → load_proj_input` has dim 5.
-- `EdgeAwareConv` — generic message passing with `msg = MLP([x_i || x_j || edge_attr])`, sum aggregation, `update = MLP([x_i || agg])`. One instance per edge type, wrapped in `HeteroConv` and stacked 3 deep with LayerNorm + residual.
-- `PDNEncoder` — emits per-node hidden representations across all four node types.
-- `PDNDroopRegressor` — encoder + 2-layer MLP head over `mesh_bot` nodes; predicts log10(droop) by default. ~615k parameters at the default `hidden_dim=64`.
+- `InputNormalizer` — log10 + z-score for log-scale columns (R, C, I_peak, freq), plain z-score for linear columns; statistics derived analytically from the parameter ranges so no fit-on-data is needed. Edge attributes are the uniform 6-dim `[R, C, I_peak, freq, duty, phase]`; the normalizer outputs a 7-dim vector with `phase` replaced by `(sin 2πφ, cos 2πφ)` for circular continuity. Each relation only populates the columns relevant to its physical role (strap: R; via: R; decap: C; load: I_peak/freq/duty/phase).
+- `EdgeAwareConv` — generic message passing with `msg = MLP([x_i || x_j || edge_attr])`, sum aggregation, `update = MLP([x_i || agg])`. One instance per edge relation, wrapped in `HeteroConv` and stacked 3 deep with LayerNorm + residual.
+- `PDNEncoder` — emits per-node hidden representations across the three node types (`mesh_top`, `mesh_bot`, `gnd`).
+- `PDNDroopRegressor` — encoder + 2-layer MLP head over `mesh_bot` nodes; predicts log10(droop) by default. ~180k parameters at `hidden_dim=32` and 3 layers (~600k at the heavier `hidden_dim=64`).
 
 Train with:
 
@@ -119,25 +121,24 @@ python scripts/eval_droop.py --ckpt checkpoints/droop_v1.pt --split test
 
 ## Targets
 
-- Static IR drop per node (mV) for a given current-load vector.
+- Static IR drop per node (mV) for a given current-load configuration.
 - Dynamic voltage-drop waveforms / peak droop, conditioned on switching activity.
-- Sensitivity of worst-case droop to decap placement and grid-strap density (via gradients through the latent code).
+- Sensitivity of worst-case droop to decap placement and grid-strap density (via gradients through the latent code, once the VAE side is wired up).
 
 ## Data
 
-PDN graphs and reference solutions are sourced from open benchmarks (e.g. IBM power-grid benchmarks, ICCAD contest grids) plus synthetically generated grids with randomized strap pitch, via density, and load maps. Ground truth comes from a SPICE-style nodal solver run offline.
+All PDN graphs and reference labels are synthetically generated. Topology is the regular 4×4 / 7×7 mesh from [tools/grid_construction.py](tools/grid_construction.py); per-sample design parameters are LHS-sampled within the ranges in [tools/sampler.py](tools/sampler.py); ground truth is produced by the MNA solver in [tools/transient_solver.py](tools/transient_solver.py) (transient peak droop + DC IR drop per sample). No external benchmarks at this stage.
 
 ## Repository layout
 
 ```
-ml/          - data loaders, GNN encoder, transformer decoder, VAE wiring
-scripts/     - training, evaluation, IR-drop inference
-tests/       - unit tests and grid-spec checks
-tools/       - PDN parsing, graph construction, SPICE ground-truth runners
-checkpoints/ - trained model artifacts
-datasets/    - benchmark and synthetic PDN graphs
+docs/        - design notes (goal scope, stop conditions)
+scripts/     - dataset build, training, evaluation, smoke / inspect helpers
+tools/       - graph construction, MNA solver, sampler, PyG dataset, encoder
+checkpoints/ - trained model artifacts (created on first train run)
+datasets/    - synthetic dataset HDF5s (created on first build)
 ```
 
 ## Status
 
-Early scaffolding. Architecture and data pipeline are being ported from Z-GED; first milestone is static IR-drop regression on the IBM PG benchmarks.
+Forward pipeline (graph construction → MNA ground truth → PyG dataset → heterogeneous GNN encoder → droop regression head) is wired up end to end. Next milestone is fitting peak-droop and static IR-drop regression to the target accuracy in [docs/GOAL.md](docs/GOAL.md), then adding the VAE / generative head.
