@@ -42,9 +42,10 @@ retooling for SPICE.
 
 1. Forward task — peak droop regression on a held-out test split: < 1 mV
    MAE on the worst-node droop, R² > 0.95 on per-(sample, node) droop.
-2. Encoder is **topology-aware**: trained jointly across pad patterns
-   (`corner`, `checker`), the model recovers a different droop map per
-   pattern from the same continuous parameters — i.e. it has actually
+2. Encoder is **topology-aware**: trained jointly across supply-mesh
+   densities `n_top ∈ {3, 4}` (and tested against the held-out
+   `n_top = 7` OOD bucket), the model recovers a different droop map per
+   topology from the same continuous parameters — i.e. it has actually
    learned the supply geometry, not just memorized a fixed grid.
 3. Latent space has structure: PCA / nearest-neighbor in latent recovers
    neighbors in design space (similar Rsheet, wire width, etc.). Required
@@ -59,9 +60,10 @@ porting to the transistor-level setting.
 
 ## What is intentionally out of scope right now
 
-- **Variable grid size.** `n_top`, `n_bot` are fixed at (4, 7). Varying
-  them changes the y-vector size and forces a refactor of the regressor
-  output; not worth doing before the fixed-size case is validated.
+- **Variable bottom-mesh size.** `n_bot` is fixed at 7 so the regressor
+  y-vector size stays at 49. `n_top` *does* vary (`{3, 4, 7}`) since the
+  y-vector is on M_bot, not M_top — so the supply-density knob is in the
+  design space, but the prediction shape isn't.
 - **VSS mesh / package & bump RL.** The current model is an RC Vdd
   network with ideal ground. That is fine for static IR drop and the
   slow part of droop, but misses high-frequency package resonance. We

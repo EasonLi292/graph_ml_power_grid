@@ -1,23 +1,74 @@
-"""Latin-Hypercube parameter sampling for the regular-PDN dataset.
+"""Reduced 3-knob parameter sampler for the regular-PDN dataset.
 
-Two parameter buckets:
+Design choice (paper-grade)
+---------------------------
+The prior sampler spanned 6 + 3 continuous knobs plus a discrete pad pattern,
+which is too much manifold for any realistic dataset size and makes the
+downstream generative model impossible to evaluate cleanly. This version cuts
+to **three** knobs, holds everything else at physically-realistic constants,
+and produces samples whose load/decap *placement* is identical across the
+entire dataset — only component values change.
 
-* **Global continuous** (LHS): ``Rsheet_top``, ``Rsheet_bot``,
-  ``wire_width``, ``R_via``, ``C_decap``, ``freq``. One value per sample.
-* **Per-load continuous** (iid per load): ``I_peak``, ``duty``, ``phase``.
-  One value per load instance per sample.
+Knobs per sample
+~~~~~~~~~~~~~~~~
 
-Topology is one discrete knob (``pad_pattern``) drawn uniformly. The
-training set sees three of the four patterns; the fourth is reserved for
-an out-of-distribution generalization split.
+* Continuous (Latin-Hypercube):
+    - ``wire_width``  log-uniform ``[0.2, 1.0]`` (× ``pitch_bot``)
+    - ``C_decap``     log-uniform ``[5e-11, 8e-10]`` F per decap site
+                         (50–800 pF — a realistic single MIM macro range)
+* Discrete (uniform):
+    - ``n_top`` ∈ ``{3, 4}`` for the training pool; ``{7}`` held out as OOD.
 
-Helpers here also expose:
+Fixed across every sample
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* ``sample_per_load`` — draws iid per-load (I_peak, duty, phase) for a
-  variable number of loads (depends on the chosen pad pattern).
-* ``axis_sweep`` — 1-D grids that hold every parameter at its median and
-  walk one axis across its full range, used to validate latent-space
-  structure rather than to train.
+* Topology
+    - ``n_bot = 7`` (bottom-mesh density — fixed everywhere)
+    - ``pad_pattern = "corner"`` — 4 corner Vdd pads. The corner pattern
+      has the property that the four pad-via bot positions are *the same
+      four bot indices* for every valid ``n_top``, so the surviving load
+      set is constant (12 loads at fixed positions) across every sample.
+* Process / electrical (geometric medians of the prior LHS box)
+    - ``Rsheet_top ≈ 0.0316 Ω/sq``
+    - ``Rsheet_bot ≈ 0.158  Ω/sq``
+    - ``R_via      ≈ 0.0632 Ω``
+    - ``freq       ≈ 0.894  GHz`` (single clock; ≈ 1 GHz target node)
+* Per-load workload (broadcast to every load instance)
+    - ``I_peak ≈ 4.47 mA``
+    - ``duty   = 0.4``
+    - ``phase  = 0.0`` (every load switches in-phase — worst-case analysis)
+
+Why these choices
+~~~~~~~~~~~~~~~~~
+
+* ``wire_width`` and ``C_decap`` are the two PDN design knobs reviewers
+  expect to see vary; both span a realistic order-of-magnitude range and
+  have monotone, recognizable effects on transient droop.
+* ``n_top`` is the M_top track-density knob — coarser ``n_top`` means
+  wider M_top pitch (longer per-segment R) and fewer top-to-bottom vias.
+  The ``(n_bot - 1) % (n_top - 1) == 0`` via-alignment constraint forces
+  ``n_top`` into the discrete set ``{2, 3, 4, 7}`` at ``n_bot = 7``; we use
+  ``{3, 4, 7}`` (drop the degenerate 2 × 2 case).
+* ``pad_pattern = "corner"`` is the worst-case-droop pattern (current
+  must travel from corners to interior loads) AND the only pattern whose
+  pad-via bot positions are independent of ``n_top``. That invariance is
+  what gives reviewers the clean "fixed placement, varying components"
+  story.
+
+Split strategy
+~~~~~~~~~~~~~~
+
+* Train / Val / Test : ``n_top ∈ {3, 4}``, uniform discrete.
+* OOD                : ``n_top = 7`` — denser supply mesh than seen in
+  training, used to probe topology extrapolation.
+
+Encoder compatibility
+~~~~~~~~~~~~~~~~~~~~~
+
+``DEFAULT_RANGES`` still contains a ``Param`` entry for every quantity the
+GNN's edge attribute pipeline sees, so the analytic ``InputNormalizer`` has
+mu/sigma for each column. Fixed quantities use ``lo == hi`` (handled by the
+normalizer as a constant column that normalizes to zero).
 """
 from __future__ import annotations
 
@@ -27,11 +78,13 @@ from typing import Literal
 import numpy as np
 from scipy.stats import qmc
 
-from .grid_construction import PAD_PATTERNS
-
 
 Scale = Literal["linear", "log"]
 
+
+# ---------------------------------------------------------------------------
+# Param / ParamRanges
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Param:
@@ -39,6 +92,10 @@ class Param:
     lo: float
     hi: float
     scale: Scale
+
+    @property
+    def is_fixed(self) -> bool:
+        return self.lo == self.hi
 
     def median(self) -> float:
         if self.scale == "log":
@@ -70,82 +127,128 @@ class ParamRanges:
         raise KeyError(name)
 
     def lhs(self, n: int, seed: int) -> np.ndarray:
-        """Return ``[n, d]`` array of parameter values in raw units."""
+        """Return ``[n, d]`` array of parameter values in raw units.
+
+        Fixed params (``lo == hi``) are emitted at their pinned value;
+        they consume a column of the LHS but the corresponding ``u`` is
+        ignored. This keeps the column layout stable when callers add or
+        remove fixed-vs-varying knobs.
+        """
         sampler = qmc.LatinHypercube(d=self.d, seed=seed)
-        u = sampler.random(n)  # uniform in [0, 1)
+        u = sampler.random(n)
         out = np.empty_like(u)
         for j, p in enumerate(self.params):
-            if p.scale == "log":
+            if p.is_fixed:
+                out[:, j] = p.lo
+            elif p.scale == "log":
                 lo, hi = np.log(p.lo), np.log(p.hi)
                 out[:, j] = np.exp(lo + u[:, j] * (hi - lo))
             else:
                 out[:, j] = p.lo + u[:, j] * (p.hi - p.lo)
         return out
 
-    def to_dict_list(self, samples: np.ndarray) -> list[dict[str, float]]:
-        return [
-            {p.name: float(samples[i, j]) for j, p in enumerate(self.params)}
-            for i in range(samples.shape[0])
-        ]
-
     def medians(self) -> dict[str, float]:
         return {p.name: p.median() for p in self.params}
 
 
-# Global continuous design parameters.
+# ---------------------------------------------------------------------------
+# The two varying continuous knobs (LHS-sampled per sample)
+# ---------------------------------------------------------------------------
+
 GLOBAL_RANGES = ParamRanges(
     params=(
-        Param("Rsheet_top", 0.01, 0.1, "log"),     # Ω / square
-        Param("Rsheet_bot", 0.05, 0.5, "log"),     # Ω / square
-        Param("wire_width", 0.2, 1.0, "log"),      # in units of pitch_bot
-        Param("R_via", 0.02, 0.2, "log"),          # Ω per via-stack
-        Param("C_decap", 1e-11, 1e-9, "log"),      # F
-        Param("freq", 2e8, 4e9, "log"),            # Hz (single clock per sample)
+        Param("wire_width", 0.2,   1.0,    "log"),   # × pitch_bot
+        Param("C_decap",    5e-11, 8e-10,  "log"),   # F per decap site (50–800 pF)
     )
 )
 
 
-# Per-load continuous parameters (iid per load instance within a sample).
-PER_LOAD_RANGES = ParamRanges(
+# ---------------------------------------------------------------------------
+# Discrete supply-density knob
+# ---------------------------------------------------------------------------
+
+TRAIN_N_TOP: tuple[int, ...] = (3, 4)
+OOD_N_TOP:   tuple[int, ...] = (7,)
+ALL_N_TOP:   tuple[int, ...] = tuple(sorted(set(TRAIN_N_TOP) | set(OOD_N_TOP)))
+
+
+def sample_n_top(
+    n: int, seed: int, choices: tuple[int, ...] = TRAIN_N_TOP
+) -> np.ndarray:
+    """Uniform-discrete draw of ``n_top`` values; returns int16 array of length ``n``."""
+    rng = np.random.default_rng(seed)
+    pool = np.asarray(choices, dtype=np.int16)
+    return pool[rng.integers(low=0, high=len(pool), size=n)]
+
+
+# ---------------------------------------------------------------------------
+# Fixed-value constants (every sample uses these)
+# ---------------------------------------------------------------------------
+
+# Topology
+FIXED_N_BOT: int = 7
+FIXED_PAD_PATTERN: str = "corner"
+
+# Process / electrical (geometric medians of the prior LHS box)
+FIXED_RSHEET_TOP: float = float(np.sqrt(0.01 * 0.1))   # ≈ 0.0316 Ω/sq
+FIXED_RSHEET_BOT: float = float(np.sqrt(0.05 * 0.5))   # ≈ 0.158  Ω/sq
+FIXED_R_VIA:      float = float(np.sqrt(0.02 * 0.2))   # ≈ 0.0632 Ω
+FIXED_FREQ:       float = float(np.sqrt(2e8 * 4e9))    # ≈ 0.894 GHz
+
+# Per-load workload (broadcast to every load instance)
+FIXED_I_PEAK: float = float(np.sqrt(1e-3 * 2e-2))      # ≈ 4.47 mA
+FIXED_DUTY:   float = 0.4
+FIXED_PHASE:  float = 0.0
+
+
+FIXED_CONSTANTS: dict[str, float | str | int] = {
+    "n_bot":       FIXED_N_BOT,
+    "pad_pattern": FIXED_PAD_PATTERN,
+    "Rsheet_top":  FIXED_RSHEET_TOP,
+    "Rsheet_bot":  FIXED_RSHEET_BOT,
+    "R_via":       FIXED_R_VIA,
+    "freq":        FIXED_FREQ,
+    "I_peak":      FIXED_I_PEAK,
+    "duty":        FIXED_DUTY,
+    "phase":       FIXED_PHASE,
+}
+
+
+# ---------------------------------------------------------------------------
+# Encoder-compatibility: ParamRanges over every column the GNN sees.
+#
+# Varying knobs (``wire_width``, ``C_decap``) get their real lo/hi. Fixed
+# quantities use ``lo == hi``; ``InputNormalizer`` detects that and emits a
+# stable constant-zero normalized column.
+# ---------------------------------------------------------------------------
+
+DEFAULT_RANGES = ParamRanges(
     params=(
-        Param("I_peak", 1e-3, 2e-2, "log"),
-        Param("duty", 0.2, 0.6, "linear"),
-        Param("phase", 0.0, 1.0, "linear"),
+        Param("wire_width", 0.2,              1.0,              "log"),
+        Param("C_decap",    5e-11,            8e-10,            "log"),
+        Param("Rsheet_top", FIXED_RSHEET_TOP, FIXED_RSHEET_TOP, "log"),
+        Param("Rsheet_bot", FIXED_RSHEET_BOT, FIXED_RSHEET_BOT, "log"),
+        Param("R_via",      FIXED_R_VIA,      FIXED_R_VIA,      "log"),
+        Param("freq",       FIXED_FREQ,       FIXED_FREQ,       "log"),
+        Param("I_peak",     FIXED_I_PEAK,     FIXED_I_PEAK,     "log"),
+        Param("duty",       FIXED_DUTY,       FIXED_DUTY,       "linear"),
+        Param("phase",      FIXED_PHASE,      FIXED_PHASE,      "linear"),
     )
 )
 
 
-# Back-compat alias for callers that just want "every continuous knob, ranges":
-DEFAULT_RANGES = ParamRanges(params=tuple(list(GLOBAL_RANGES.params) + list(PER_LOAD_RANGES.params)))
-
-
-EXTRAPOLATION_RANGES = ParamRanges(
-    params=(
-        Param("Rsheet_top", 0.1, 0.3, "log"),
-        Param("Rsheet_bot", 0.5, 1.5, "log"),
-        Param("wire_width", 0.1, 0.2, "log"),
-        Param("R_via", 0.2, 0.4, "log"),
-        Param("C_decap", 1e-12, 1e-11, "log"),
-        Param("freq", 4e9, 6e9, "log"),
-        Param("I_peak", 2e-2, 3e-2, "log"),
-        Param("duty", 0.6, 0.8, "linear"),
-        Param("phase", 0.0, 1.0, "linear"),
-    )
-)
-
-
-# Pattern split: train on the first 3, hold out the 4th for OOD evaluation.
-TRAIN_PAD_PATTERNS: tuple[str, ...] = ("corner", "checker", "edge_strip")
-OOD_PAD_PATTERNS: tuple[str, ...] = ("distributed",)
-
+# ---------------------------------------------------------------------------
+# Derived ranges (for the normalizer's R_top / R_bot stats)
+# ---------------------------------------------------------------------------
 
 def derived_R_ranges(
     ranges: ParamRanges, pitch_top: float, pitch_bot: float
 ) -> dict[str, tuple[float, float, Scale]]:
-    """Analytic ranges of the derived per-segment R_top / R_bot.
+    """Analytic ranges of the derived per-segment ``R_top`` / ``R_bot``.
 
-    ``R_seg = Rsheet × (pitch / wire_width)``; ``Rsheet`` and ``wire_width``
-    are sampled log-uniformly, so ``R_seg`` is also log-uniform.
+    ``R_seg = Rsheet × (pitch / wire_width)``. With ``Rsheet`` fixed (lo == hi)
+    and ``wire_width`` log-uniform, ``R_seg`` is log-uniform over the band
+    ``[Rsheet · pitch / ww.hi, Rsheet · pitch / ww.lo]``.
     """
     rs_top = ranges.by_name("Rsheet_top")
     rs_bot = ranges.by_name("Rsheet_bot")
@@ -156,60 +259,24 @@ def derived_R_ranges(
     }
 
 
-def sample_pad_patterns(n: int, seed: int, choices: tuple[str, ...] = TRAIN_PAD_PATTERNS) -> np.ndarray:
-    """Uniform i.i.d. draw of pad-pattern indices into ``PAD_PATTERNS``.
-
-    Indices are with respect to the full ``PAD_PATTERNS`` tuple so they are
-    consistent across splits regardless of which patterns each split uses.
-    """
-    rng = np.random.default_rng(seed)
-    pool = np.array([PAD_PATTERNS.index(c) for c in choices], dtype=np.int8)
-    pick = rng.integers(low=0, high=len(pool), size=n)
-    return pool[pick]
-
-
-def sample_per_load(
-    n_loads_per_sample: list[int],
-    seed: int,
-    ranges: ParamRanges = PER_LOAD_RANGES,
-    max_n_loads: int | None = None,
-) -> np.ndarray:
-    """iid per-load draws for each sample.
-
-    Returns ``[N, max_n_loads, len(ranges.params)]`` padded with zeros for
-    samples that have fewer than ``max_n_loads`` loads.
-    """
-    N = len(n_loads_per_sample)
-    if max_n_loads is None:
-        max_n_loads = max(n_loads_per_sample) if n_loads_per_sample else 0
-    rng = np.random.default_rng(seed)
-    out = np.zeros((N, max_n_loads, ranges.d), dtype=np.float32)
-    for i, k in enumerate(n_loads_per_sample):
-        u = rng.random((k, ranges.d))
-        for j, p in enumerate(ranges.params):
-            if p.scale == "log":
-                lo, hi = np.log(p.lo), np.log(p.hi)
-                out[i, :k, j] = np.exp(lo + u[:, j] * (hi - lo))
-            else:
-                out[i, :k, j] = p.lo + u[:, j] * (p.hi - p.lo)
-    return out
-
+# ---------------------------------------------------------------------------
+# Axis sweeps (for latent-structure / sensitivity plots)
+# ---------------------------------------------------------------------------
 
 def axis_sweep(
     axis: str,
     n_points: int,
-    global_ranges: ParamRanges = GLOBAL_RANGES,
-    per_load_ranges: ParamRanges = PER_LOAD_RANGES,
-) -> tuple[np.ndarray, dict[str, float], dict[str, float]]:
-    """1-D sweep along ``axis``; all other knobs held at their medians.
+    ranges: ParamRanges = GLOBAL_RANGES,
+) -> tuple[np.ndarray, dict[str, float]]:
+    """1-D sweep along ``axis`` with the other continuous knobs at median.
 
-    Returns ``(axis_values, fixed_global_medians, fixed_per_load_medians)``.
-    The caller is responsible for assembling these into per-sample dicts.
+    Returns ``(axis_values, other_continuous_medians)``. Callers combine
+    these with the fixed constants and a chosen ``n_top`` to assemble
+    per-sample parameter dicts. ``axis`` must be a name in ``ranges``;
+    sweeping over the discrete ``n_top`` is done by direct enumeration
+    upstream, not via this helper.
     """
-    if axis in global_ranges.names:
-        p = global_ranges.by_name(axis)
-    elif axis in per_load_ranges.names:
-        p = per_load_ranges.by_name(axis)
-    else:
-        raise KeyError(f"unknown sweep axis: {axis!r}")
-    return p.grid(n_points), global_ranges.medians(), per_load_ranges.medians()
+    if axis not in ranges.names:
+        raise KeyError(f"unknown sweep axis: {axis!r} (must be one of {ranges.names})")
+    p = ranges.by_name(axis)
+    return p.grid(n_points), ranges.medians()

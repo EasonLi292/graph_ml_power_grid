@@ -33,7 +33,7 @@ def pick_device(arg: str) -> torch.device:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", type=Path, default=Path("datasets/regular_v2/dataset.h5"))
+    ap.add_argument("--data", type=Path, default=Path("datasets/regular_v4/dataset.h5"))
     ap.add_argument("--target", choices=["log", "linear"], default="log")
     ap.add_argument("--hidden-dim", type=int, default=64)
     ap.add_argument("--n-layers", type=int, default=3)

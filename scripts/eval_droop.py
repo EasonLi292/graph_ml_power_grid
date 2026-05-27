@@ -18,7 +18,7 @@ from tools.training import evaluate
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", type=Path, default=Path("datasets/regular_v2/dataset.h5"))
+    ap.add_argument("--data", type=Path, default=Path("datasets/regular_v4/dataset.h5"))
     ap.add_argument("--ckpt", type=Path, default=Path("checkpoints/droop_regressor.pt"))
     ap.add_argument("--split", choices=["train", "val", "test"], default="test")
     ap.add_argument("--target", choices=["log", "linear"], default="log")

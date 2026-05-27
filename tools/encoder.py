@@ -30,7 +30,7 @@ from .grid_construction import (
     NODE_FEATURE_DIM,
     build_regular_pdn,
 )
-from .sampler import DEFAULT_RANGES, ParamRanges, derived_R_ranges
+from .sampler import ALL_N_TOP, DEFAULT_RANGES, FIXED_PAD_PATTERN, ParamRanges, derived_R_ranges
 
 
 # ----- node / edge type constants (kept in one place) -----
@@ -81,19 +81,37 @@ class InputNormalizer(nn.Module):
             else:
                 lo_t, hi_t = lo, hi
             mu = 0.5 * (lo_t + hi_t)
-            sigma = (hi_t - lo_t) / math.sqrt(12) + 1e-8
+            if lo == hi:
+                # Fixed param: sigma must be bounded well away from zero so
+                # any float32 jitter at the value doesn't blow up the
+                # normalized column. The normalized value is ~ 0 by design.
+                sigma = 1.0
+            else:
+                sigma = (hi_t - lo_t) / math.sqrt(12) + 1e-8
             self.register_buffer(f"mu_{name}", torch.tensor(mu, dtype=torch.float32))
             self.register_buffer(f"sigma_{name}", torch.tensor(sigma, dtype=torch.float32))
 
         for p in ranges.params:
             _register(p.name, p.lo, p.hi, p.scale)
 
-        # Derived per-segment R_top / R_bot for the canonical topology.
-        # Pad pattern doesn't affect pitch, only pad placement.
-        proto = build_regular_pdn()
-        for name, (lo, hi, scale) in derived_R_ranges(
-            ranges, proto.pitch_top, proto.pitch_bot
-        ).items():
+        # Derived per-segment R_top / R_bot. Pitch_top changes with n_top
+        # (coarser top mesh → longer segment), so the analytic range needs
+        # to span the union over every n_top this dataset emits. Pitch_bot
+        # is invariant (n_bot fixed).
+        pitch_tops, pitch_bots = [], []
+        for nt in ALL_N_TOP:
+            proto_nt = build_regular_pdn(n_top=nt, pad_pattern=FIXED_PAD_PATTERN)
+            pitch_tops.append(proto_nt.pitch_top)
+            pitch_bots.append(proto_nt.pitch_bot)
+        agg = {}
+        for pt, pb in zip(pitch_tops, pitch_bots):
+            for name, (lo, hi, scale) in derived_R_ranges(ranges, pt, pb).items():
+                if name not in agg:
+                    agg[name] = [lo, hi, scale]
+                else:
+                    agg[name][0] = min(agg[name][0], lo)
+                    agg[name][1] = max(agg[name][1], hi)
+        for name, (lo, hi, scale) in agg.items():
             _register(name, lo, hi, scale)
 
         self._log_params = log_params

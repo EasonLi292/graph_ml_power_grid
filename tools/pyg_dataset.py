@@ -1,16 +1,20 @@
-"""PyG ``Dataset`` wrapper around the v3 dataset HDF5.
+"""PyG ``Dataset`` wrapper around the v4 dataset HDF5.
 
-For every sample we look up the right ``HeteroData`` template by
-``pad_pattern_idx`` (one template per pad pattern, cached at init),
-clone, then fill in:
+Each sample looks up a per-``n_top`` ``HeteroData`` template, clones it,
+then fills in the per-sample edge-attribute columns:
 
-* strap edge ``R`` columns (top, bot) — derived from the sample's global
-  ``Rsheet_*`` × ``pitch / wire_width``;
-* via edge ``R`` column = ``R_via``;
-* decap edge ``C`` column = ``C_decap``;
-* load edge ``(I_peak, freq, duty, phase)`` columns — copied from the
-  per-load slice of ``load_x`` (first ``n_loads`` rows);
-* ``mesh_bot.y`` from the chosen droop target (``peak`` or ``static``).
+* strap edge ``R`` (top, bot) — derived from the fixed ``Rsheet_*`` and
+  the sample's ``wire_width``;
+* via edge ``R`` — fixed (``R_via``);
+* decap edge ``C`` — the sample's ``C_decap``;
+* load edge ``(I_peak, freq, duty, phase)`` — all fixed; broadcast from
+  the sampler constants (the HDF5 stores them once as a root attribute,
+  not per-sample, since they are invariant by design);
+* ``mesh_bot.y`` — the chosen droop target.
+
+Only two continuous quantities actually vary across samples
+(``wire_width`` and ``C_decap``); ``n_top`` selects which template to
+clone. Everything else is constant by construction.
 """
 from __future__ import annotations
 
@@ -24,9 +28,19 @@ import numpy as np
 from .grid_construction import (
     EDGE_ATTR_COLS,
     EDGE_ATTR_DIM,
-    PAD_PATTERNS,
     build_regular_pdn,
     to_hetero_data,
+)
+from .sampler import (
+    ALL_N_TOP,
+    FIXED_DUTY,
+    FIXED_FREQ,
+    FIXED_I_PEAK,
+    FIXED_PAD_PATTERN,
+    FIXED_PHASE,
+    FIXED_R_VIA,
+    FIXED_RSHEET_BOT,
+    FIXED_RSHEET_TOP,
 )
 
 
@@ -36,19 +50,19 @@ LOG_FLOOR = 1e-7  # volts; clip to avoid log(0) at the corner pads
 
 
 class RegularPDNDataset:
-    """Loads one section of the v3 dataset HDF5.
+    """Loads one section of the v4 dataset HDF5.
 
     Args:
         h5_path: path to the dataset HDF5 file.
         split: ``"train" | "val" | "test"`` (under ``/bulk``), or
-            ``"ood_<pattern>"`` (under ``/ood``), or a sweep selector
-            ``"sweep:<axis>/<pattern>"`` (under ``/analysis/sweeps``).
+            ``"ood_n_top_<N>"`` (under ``/ood``), or
+            ``"sweep:<axis>/n_top_<N>"`` (under ``/analysis/sweeps``).
         target: ``"linear"`` returns droop in volts; ``"log"`` returns
             ``log10(droop)``.
         droop_kind: ``"peak"`` (transient) or ``"static"`` (DC IR drop).
     """
 
-    GLOBAL_KEYS = ("Rsheet_top", "Rsheet_bot", "wire_width", "R_via", "C_decap", "freq")
+    GLOBAL_KEYS = ("wire_width", "C_decap")
 
     def __init__(
         self,
@@ -64,21 +78,23 @@ class RegularPDNDataset:
 
         with h5py.File(self.h5_path, "r") as f:
             grp = self._resolve_group(f, split)
-            self._global = grp["global_params"][:]            # [N, 6]
-            self._pad_idx = grp["pad_pattern_idx"][:]         # [N] int8
-            self._load_x = grp["load_x"][:]                   # [N, max_n_loads, 4]
-            self._n_loads = grp["n_loads"][:]                 # [N] int16
+            self._global = grp["global_params"][:]            # [N, 2]
+            self._n_top  = grp["n_top"][:]                    # [N] int16
             key = "peak_droop_bot" if droop_kind == "peak" else "static_droop_bot"
             self._target_y = grp[key][:]                      # [N, n_bot^2]
 
-        # One template per pad pattern (cheap — built once at init).
-        self._templates = {
-            i: to_hetero_data(build_regular_pdn(pad_pattern=pp))
-            for i, pp in enumerate(PAD_PATTERNS)
-        }
-        proto = build_regular_pdn()
-        self._pitch_top = proto.pitch_top
-        self._pitch_bot = proto.pitch_bot
+        # Per-n_top template + pitch lookup, computed once.
+        self._templates: dict[int, object] = {}
+        self._pitch_by_n_top: dict[int, tuple[float, float]] = {}
+        for nt in ALL_N_TOP:
+            g = build_regular_pdn(n_top=int(nt), pad_pattern=FIXED_PAD_PATTERN)
+            self._templates[int(nt)] = to_hetero_data(g)
+            self._pitch_by_n_top[int(nt)] = (g.pitch_top, g.pitch_bot)
+        self._n_loads = int(g.n_loads)  # n_loads is invariant across n_top here
+
+        # Column positions in the global_params row.
+        self._ww_col = list(self.GLOBAL_KEYS).index("wire_width")
+        self._cd_col = list(self.GLOBAL_KEYS).index("C_decap")
 
     # ----- group resolution -------------------------------------------------
 
@@ -86,15 +102,15 @@ class RegularPDNDataset:
     def _resolve_group(f: h5py.File, split: str) -> h5py.Group:
         if split in ("train", "val", "test"):
             return f["bulk"][split]
-        if split.startswith("ood_"):
+        if split.startswith("ood_n_top_"):
             return f["ood"][split[4:]]
         if split.startswith("sweep:"):
-            axis_pattern = split[len("sweep:") :]
-            axis, pattern = axis_pattern.split("/")
-            return f["analysis"]["sweeps"][axis][pattern]
+            axis_pattern = split[len("sweep:"):]
+            axis, n_top_key = axis_pattern.split("/")
+            return f["analysis"]["sweeps"][axis][n_top_key]
         raise KeyError(
-            f"unknown split {split!r}; expected train/val/test, ood_<pattern>, "
-            f"or sweep:<axis>/<pattern>"
+            f"unknown split {split!r}; expected train/val/test, "
+            f"ood_n_top_<N>, or sweep:<axis>/n_top_<N>"
         )
 
     # ----- dataset protocol -------------------------------------------------
@@ -110,36 +126,40 @@ class RegularPDNDataset:
     _D_COL = EDGE_ATTR_COLS.index("duty")
     _P_COL = EDGE_ATTR_COLS.index("phase")
 
+    def _build_load_attr(self, n_loads: int):
+        import torch
+
+        a = np.zeros((n_loads, EDGE_ATTR_DIM), dtype=np.float32)
+        a[:, self._I_COL] = FIXED_I_PEAK
+        a[:, self._F_COL] = FIXED_FREQ
+        a[:, self._D_COL] = FIXED_DUTY
+        a[:, self._P_COL] = FIXED_PHASE
+        return torch.from_numpy(a)
+
     def __getitem__(self, idx: int):
         import torch
 
-        pp_idx = int(self._pad_idx[idx])
-        data = deepcopy(self._templates[pp_idx])
-        g = self._global[idx]
-        Rsheet_top = float(g[0]); Rsheet_bot = float(g[1]); wire_width = float(g[2])
-        R_via = float(g[3]); C_decap = float(g[4])
+        n_top = int(self._n_top[idx])
+        data = deepcopy(self._templates[n_top])
+        pitch_top, pitch_bot = self._pitch_by_n_top[n_top]
 
-        R_top = Rsheet_top * (self._pitch_top / wire_width)
-        R_bot = Rsheet_bot * (self._pitch_bot / wire_width)
+        wire_width = float(self._global[idx, self._ww_col])
+        C_decap    = float(self._global[idx, self._cd_col])
 
-        # strap and via: write only the R column.
+        # Strap and via R columns: Rsheet_* fixed, wire_width varies.
+        R_top = FIXED_RSHEET_TOP * (pitch_top / wire_width)
+        R_bot = FIXED_RSHEET_BOT * (pitch_bot / wire_width)
         data["mesh_top", "strap", "mesh_top"].edge_attr[:, self._R_COL] = R_top
         data["mesh_bot", "strap", "mesh_bot"].edge_attr[:, self._R_COL] = R_bot
-        data["mesh_top", "via", "mesh_bot"].edge_attr[:, self._R_COL] = R_via
-        data["mesh_bot", "via", "mesh_top"].edge_attr[:, self._R_COL] = R_via
+        data["mesh_top", "via", "mesh_bot"].edge_attr[:, self._R_COL] = FIXED_R_VIA
+        data["mesh_bot", "via", "mesh_top"].edge_attr[:, self._R_COL] = FIXED_R_VIA
 
-        # decap: write only the C column.
+        # Decap C column.
         data["mesh_bot", "decap", "gnd"].edge_attr[:, self._C_COL] = C_decap
         data["gnd", "decap", "mesh_bot"].edge_attr[:, self._C_COL] = C_decap
 
-        # load: replace the I/freq/duty/phase columns with per-edge values.
-        n_loads = int(self._n_loads[idx])
-        load_attr = torch.zeros((n_loads, EDGE_ATTR_DIM), dtype=torch.float32)
-        load_slice = torch.from_numpy(self._load_x[idx, :n_loads, :].astype(np.float32))
-        load_attr[:, self._I_COL] = load_slice[:, 0]
-        load_attr[:, self._F_COL] = load_slice[:, 1]
-        load_attr[:, self._D_COL] = load_slice[:, 2]
-        load_attr[:, self._P_COL] = load_slice[:, 3]
+        # Load (I/freq/duty/phase) — all fixed; built from sampler constants.
+        load_attr = self._build_load_attr(self._n_loads)
         data["mesh_bot", "load", "gnd"].edge_attr = load_attr
         data["gnd", "load", "mesh_bot"].edge_attr = load_attr.clone()
 

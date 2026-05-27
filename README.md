@@ -28,82 +28,84 @@ A PDN is encoded as a heterogeneous graph with three node types and five logical
 
 **Edge relations**, all bidirectional, all carrying the same 6-dim attribute `[R, C, I_peak, freq, duty, phase]` (zero in columns not relevant to that element type):
 
-- `mesh_top ↔ mesh_top` strap — `R` column = derived top-segment resistance.
-- `mesh_bot ↔ mesh_bot` strap — `R` column = derived bot-segment resistance.
-- `mesh_top ↔ mesh_bot` via — `R` column = `R_via`.
-- `mesh_bot ↔ gnd` decap — `C` column = `C_decap`.
+- `mesh_top ↔ mesh_top` strap — `R` = derived top-segment resistance.
+- `mesh_bot ↔ mesh_bot` strap — `R` = derived bot-segment resistance.
+- `mesh_top ↔ mesh_bot` via — `R` = `R_via`.
+- `mesh_bot ↔ gnd` decap — `C` = `C_decap`.
 - `mesh_bot ↔ gnd` load — `(I_peak, freq, duty, phase)` columns; per-edge values. **The load is a current source, not a resistor** — its current is dictated by switching activity, not by Ohm's law, so an `R_load = V/I` model would create a spurious voltage-current feedback under droop.
 
-Same-type bidirectionality (e.g. `mesh_top ↔ mesh_top`) is one PyG relation with both directions packed into `edge_index`. Cross-type bidirectionality (e.g. via, decap, load) is expressed as two PyG relations sharing the same relation name, since PyG keys relations by `(src_type, name, dst_type)`. In the normalizer, the raw 6-dim edge attribute is mapped to 7-dim by replacing `phase` with `(sin 2πφ, cos 2πφ)` for circular continuity on load edges.
+Same-type bidirectionality (e.g. `mesh_top ↔ mesh_top`) is one PyG relation with both directions packed into `edge_index`. Cross-type bidirectionality (e.g. via, decap, load) is expressed as two PyG relations sharing the same relation name. In the normalizer, the raw 6-dim edge attribute is mapped to 7-dim by replacing `phase` with `(sin 2πφ, cos 2πφ)` for circular continuity on load edges.
 
-**Canonical regular instance** ([tools/grid_construction.py](tools/grid_construction.py), `build_regular_pdn`): 4×4 M_top stacked on 7×7 M_bot, vias at every M_top node aligned to even M_bot positions, four supply-pad patterns (`corner` 4 pads / `checker` 8 / `edge_strip` 12 / `distributed` 8 with corners + interior 2×2), loads on the even M_bot sub-grid *minus* any node directly under a Vdd-pad via (so a load can never sit on an ideal supply tap), 9 decaps offset onto the odd sub-grid. Per-segment `R_top`, `R_bot` are derived from sheet resistance × pitch / wire width: `R_seg = Rsheet × (pitch / wire_width)`. Each load draws its own `(I_peak, duty, phase)` independently — one shared clock `freq` per sample (single clock domain). The pad pattern is drawn uniformly per sample; three patterns are used for training and `distributed` is held out as an OOD topology probe.
+**Canonical regular instance** ([tools/grid_construction.py](tools/grid_construction.py), `build_regular_pdn`): `n_top × n_top` M_top stacked on 7×7 M_bot, vias at every M_top node aligned to the corresponding bot positions. Four supply-pad patterns are supported by the builder (`corner` / `checker` / `edge_strip` / `distributed`), but **this dataset pins `pad_pattern="corner"`** so the four pad-via bot positions are independent of `n_top` and the surviving load set stays at a constant 12 cells across every sample. Loads sit on the even M_bot sub-grid *minus* nodes directly under a Vdd-pad via; 9 decap sites sit on the odd sub-grid. Per-segment `R_top`, `R_bot` are derived from sheet resistance × pitch / wire width: `R_seg = Rsheet × (pitch / wire_width)`. Every load draws the same `(I_peak, freq, duty, phase)` waveform — see "Dataset" below for the design rationale.
 
 Ground truth: backward-Euler MNA transient simulation in [tools/transient_solver.py](tools/transient_solver.py). Smoke test: `python scripts/smoke_test.py` builds the canonical instance, runs a 5 ns / 10 ps transient, and prints peak droop per M_bot node.
 
 ## Dataset
 
-Grid size is fixed at (4, 7). Each sample has three parameter buckets:
+**Reduced 3-knob design space** (see [tools/sampler.py](tools/sampler.py) for the full rationale). The prior 9-continuous-knob LHS made it impossible to evaluate the eventual generative model cleanly; this version cuts to three knobs, pins everything else to physically realistic constants, and produces samples whose load/decap *placement* is identical across the entire dataset — only component values change.
 
-**Global continuous** (one value per sample, LHS-sampled from `GLOBAL_RANGES`):
+### Varying knobs
 
-| param         | range            | scale       | meaning |
-|---------------|------------------|-------------|---------|
-| `Rsheet_top`  | 0.01 – 0.1 Ω/sq  | log-uniform | top-metal sheet resistance |
-| `Rsheet_bot`  | 0.05 – 0.5 Ω/sq  | log-uniform | bottom-metal sheet resistance |
-| `wire_width`  | 0.2 – 1.0        | log-uniform | strap width (in units of `pitch_bot`) |
-| `R_via`       | 0.02 – 0.2 Ω     | log-uniform | per-via-stack resistance |
-| `C_decap`     | 10 pF – 1 nF     | log-uniform | per-decap capacitance |
-| `freq`        | 200 MHz – 4 GHz  | log-uniform | clock frequency (single domain) |
+| param        | range / set                | scale            | meaning |
+|--------------|----------------------------|------------------|---------|
+| `wire_width` | 0.2 – 1.0                  | log-uniform      | strap width (× `pitch_bot`) |
+| `C_decap`    | 50 pF – 800 pF             | log-uniform      | per-decap-site capacitance (single MIM macro) |
+| `n_top`      | `{3, 4}` train; `{7}` OOD  | uniform discrete | M_top track density (= via-stub density to M_bot) |
 
-**Per-load continuous** (independently sampled for *each* load instance within a sample, from `PER_LOAD_RANGES`):
+`wire_width` and `C_decap` are LHS-sampled jointly; `n_top` is uniform discrete and bucketed for the topology-OOD split (model trains on `{3, 4}`, evaluates extrapolation on `{7}`).
 
-| param      | range          | scale       |
-|------------|----------------|-------------|
-| `I_peak`   | 1 mA – 20 mA   | log-uniform |
-| `duty`     | 0.2 – 0.6      | uniform     |
-| `phase`    | 0 – 1          | uniform     |
+### Fixed constants (every sample)
 
-Each load has its own activity factor (closer to real "different gate types per instance"). The encoder maps the raw phase into `(sin 2πφ, cos 2πφ)` so it gets the circular continuity for free.
+| topology        | value     | electrical / workload | value         |
+|-----------------|-----------|-----------------------|---------------|
+| `n_bot`         | 7         | `Rsheet_top`          | ≈ 0.0316 Ω/sq |
+| `pad_pattern`   | `corner`  | `Rsheet_bot`          | ≈ 0.158 Ω/sq  |
+| `n_loads`       | 12        | `R_via`               | ≈ 0.0632 Ω    |
+| `n_decaps`      | 9         | `freq`                | ≈ 0.894 GHz   |
+|                 |           | `I_peak`              | ≈ 4.47 mA (broadcast to every load) |
+|                 |           | `duty`                | 0.4 |
+|                 |           | `phase`               | 0.0 (all loads in-phase — worst case) |
 
-**Topology** (discrete, uniform per sample over the chosen pattern pool): one of four pad patterns — `corner` (4 pads), `checker` (8), `edge_strip` (12), `distributed` (8, corners + interior 2×2). Three patterns (`corner`, `checker`, `edge_strip`) are used for training/val/test; `distributed` is held out as an OOD topology probe.
+All electrical constants are geometric medians of the prior LHS box, so this dataset's operating point sits in the middle of the prior design space.
 
-Per-segment R the solver actually stamps is derived: `R_top = Rsheet_top × (pitch_top / wire_width)` and similarly for `R_bot`. At the default topology `pitch_top = 2 × pitch_bot`, so the top straps pick up a 2× geometric factor even at equal sheet R.
+**Per-segment R derivation:** the solver stamps `R_top = Rsheet_top × (pitch_top / wire_width)` and `R_bot = Rsheet_bot × (pitch_bot / wire_width)`. `pitch_top` varies with `n_top` (`pitch_top ∈ {3.0, 2.0, 1.0}` for `n_top ∈ {3, 4, 7}` at `n_bot = 7`), so `R_top` actually spans ~15× across the dataset even though `Rsheet_top` is fixed.
 
-Per-sample sim: warmup of `max(2 periods, ceil(5·R_bot·C_decap / period))` periods so the initial-condition transient is ≲1% residual regardless of the freq/RC ratio, then 8 measurement periods × 100 steps/period. Each sample yields two labels: **peak droop** (Vdd − Vmin over the measurement window) and **static IR drop** (DC solve under the time-averaged load current, `I_peak × duty` per load).
+**Per-sample sim:** warmup of `max(2 periods, ceil(5·R_bot·C_decap / period))` periods so the initial-condition transient is ≲1% residual regardless of the freq/RC ratio, then 8 measurement periods × 100 steps/period. Each sample yields **peak droop** (Vdd − Vmin over the measurement window) and **static IR drop** (DC solve under the time-averaged load current `I_peak × duty` per load).
 
-### H5 layout
+### H5 layout (v4)
 
 ```
-/                                       attrs: version=3, ranges, topology, sim_config, ...
-├── bulk/{train, val, test}/            LHS over the 3 training patterns
-│     ├── global_params [N, 6]
-│     ├── pad_pattern_idx [N]
-│     ├── load_x [N, max_n_loads=12, 4]   per-load (I_peak, freq, duty, phase), zero-padded
-│     ├── n_loads [N]
-│     ├── peak_droop_bot   [N, 49]
-│     ├── static_droop_bot [N, 49]
-│     ├── peak_droop_top,  static_droop_top, worst_node_*
-│     └── V_subset/ (train only — first 200 samples' full V(t))
-├── ood/distributed/                    held-out pad pattern; same fields
-└── analysis/sweeps/<axis>/<pattern>/   1-D sweep with all-others-at-median; 50 pts default
+/                                       attrs: version=4, fixed_constants, train_n_top, ood_n_top,
+                                               load_attr_row, topology (per n_top), sim_config, ...
+├── bulk/{train, val, test}/            LHS over (wire_width, C_decap) × uniform(TRAIN_N_TOP)
+│     ├── global_params      [N, 2]    (wire_width, C_decap)
+│     ├── n_top              [N]
+│     ├── peak_droop_bot     [N, 49]
+│     ├── static_droop_bot   [N, 49]
+│     ├── worst_node_idx, worst_node_droop
+│     └── V_subset/ (train only — first 200 samples' full V(t) on M_bot)
+├── ood/n_top_<N>/                      same continuous LHS at a held-out n_top
+└── analysis/sweeps/<axis>/n_top_<N>/   1-D sweep along a continuous axis at fixed n_top
 ```
+
+The H5 stores no per-sample `load_x` or `n_loads` — those are constants and live as root attributes (`load_attr_row`, `n_loads`). The PyG loader pulls them from the sampler constants directly.
 
 Build with:
 
 ```
-python scripts/build_dataset.py --out datasets/regular_v2/dataset.h5 \
+python scripts/build_dataset.py --out datasets/regular_v4/dataset.h5 \
     --n-train 16000 --n-val 2000 --n-test 2000 --n-ood 2000 \
     --sweep-points 50 --seed 42
-python scripts/inspect_dataset.py datasets/regular_v2/dataset.h5
+python scripts/inspect_dataset.py datasets/regular_v4/dataset.h5
 ```
 
-[tools/pyg_dataset.py](tools/pyg_dataset.py) wraps the H5 as a PyG-compatible `Dataset`. `split` accepts `"train" | "val" | "test"` for the bulk loaders, `"ood_distributed"` for the held-out pattern, or `"sweep:<axis>/<pattern>"` for the analysis grids. `droop_kind="peak"` (default) trains against transient droop; `droop_kind="static"` trains against DC IR drop. `target="linear"` returns droop in volts; `target="log"` returns `log10(droop)` — peak droop is heavy-tailed (linear skew ≈ 1.8, log skew ≈ 0), so the log target trains more cleanly in practice.
+[tools/pyg_dataset.py](tools/pyg_dataset.py) wraps the H5 as a PyG-compatible `Dataset`. `split` accepts `"train" | "val" | "test"` for the bulk loaders, `"ood_n_top_<N>"` for the held-out topology, or `"sweep:<axis>/n_top_<N>"` for the analysis grids. `droop_kind="peak"` (default) trains against transient droop; `droop_kind="static"` trains against DC IR drop. `target="linear"` returns droop in volts; `target="log"` returns `log10(droop)` — peak droop is heavy-tailed, so the log target trains more cleanly.
 
 ## Encoder + droop regressor
 
 [tools/encoder.py](tools/encoder.py) implements the heterogeneous GNN encoder and a droop-regression head:
 
-- `InputNormalizer` — log10 + z-score for log-scale columns (R, C, I_peak, freq), plain z-score for linear columns; statistics derived analytically from the parameter ranges so no fit-on-data is needed. Edge attributes are the uniform 6-dim `[R, C, I_peak, freq, duty, phase]`; the normalizer outputs a 7-dim vector with `phase` replaced by `(sin 2πφ, cos 2πφ)` for circular continuity. Each relation only populates the columns relevant to its physical role (strap: R; via: R; decap: C; load: I_peak/freq/duty/phase).
+- `InputNormalizer` — log10 + z-score for log-scale columns (R, C, I_peak, freq), plain z-score for linear columns; statistics derived analytically from the parameter ranges so no fit-on-data is needed. Columns that are constant across the dataset (`I_peak`, `freq`, `duty`, `phase`, `R_via`, `Rsheet_*`) register with a bounded-sigma stat so they normalize to a stable zero — the GNN still sees them but they carry no per-sample signal. Edge attributes are the uniform 6-dim `[R, C, I_peak, freq, duty, phase]`; the normalizer outputs a 7-dim vector with `phase` replaced by `(sin 2πφ, cos 2πφ)`.
 - `EdgeAwareConv` — generic message passing with `msg = MLP([x_i || x_j || edge_attr])`, sum aggregation, `update = MLP([x_i || agg])`. One instance per edge relation, wrapped in `HeteroConv` and stacked 3 deep with LayerNorm + residual.
 - `PDNEncoder` — emits per-node hidden representations across the three node types (`mesh_top`, `mesh_bot`, `gnd`).
 - `PDNDroopRegressor` — encoder + 2-layer MLP head over `mesh_bot` nodes; predicts log10(droop) by default. ~180k parameters at `hidden_dim=32` and 3 layers (~600k at the heavier `hidden_dim=64`).
@@ -111,7 +113,7 @@ python scripts/inspect_dataset.py datasets/regular_v2/dataset.h5
 Train with:
 
 ```
-python scripts/train_droop.py --data datasets/regular_v2/dataset.h5 \
+python scripts/train_droop.py --data datasets/regular_v4/dataset.h5 \
     --epochs 60 --batch-size 128 --lr 2e-3 --target log \
     --ckpt checkpoints/droop_v1.pt
 python scripts/eval_droop.py --ckpt checkpoints/droop_v1.pt --split test
@@ -127,7 +129,7 @@ python scripts/eval_droop.py --ckpt checkpoints/droop_v1.pt --split test
 
 ## Data
 
-All PDN graphs and reference labels are synthetically generated. Topology is the regular 4×4 / 7×7 mesh from [tools/grid_construction.py](tools/grid_construction.py); per-sample design parameters are LHS-sampled within the ranges in [tools/sampler.py](tools/sampler.py); ground truth is produced by the MNA solver in [tools/transient_solver.py](tools/transient_solver.py) (transient peak droop + DC IR drop per sample). No external benchmarks at this stage.
+All PDN graphs and reference labels are synthetically generated. Topology is the regular `n_top × 7` mesh from [tools/grid_construction.py](tools/grid_construction.py); per-sample design parameters are LHS-sampled within the ranges in [tools/sampler.py](tools/sampler.py); ground truth is produced by the MNA solver in [tools/transient_solver.py](tools/transient_solver.py) (transient peak droop + DC IR drop per sample). No external benchmarks at this stage.
 
 ## Repository layout
 
@@ -141,4 +143,4 @@ datasets/    - synthetic dataset HDF5s (created on first build)
 
 ## Status
 
-Forward pipeline (graph construction → MNA ground truth → PyG dataset → heterogeneous GNN encoder → droop regression head) is wired up end to end. Next milestone is fitting peak-droop and static IR-drop regression to the target accuracy in [docs/GOAL.md](docs/GOAL.md), then adding the VAE / generative head.
+Forward pipeline (graph construction → MNA ground truth → PyG dataset → heterogeneous GNN encoder → droop regression head) is wired up end to end against the 3-knob v4 design space. Next milestone is fitting peak-droop and static IR-drop regression to the target accuracy in [docs/GOAL.md](docs/GOAL.md), then adding the VAE / generative head.

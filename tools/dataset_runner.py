@@ -63,6 +63,8 @@ def run_one(p: dict, keep_full_traj: bool = False, cfg: SimConfig | None = None)
     dt = period / cfg.steps_per_period
 
     g = build_regular_pdn(
+        n_top=int(p.get("n_top", 4)),
+        n_bot=int(p.get("n_bot", 7)),
         Vdd=cfg.Vdd,
         Rsheet_top=p["Rsheet_top"],
         Rsheet_bot=p["Rsheet_bot"],
@@ -83,25 +85,18 @@ def run_one(p: dict, keep_full_traj: bool = False, cfg: SimConfig | None = None)
 
     warmup = warmup_periods * cfg.steps_per_period
     V_bot_ss = res["V_bot"][warmup:]
-    V_top_ss = res["V_top"][warmup:]
 
     peak_droop_bot = (cfg.Vdd - V_bot_ss.min(axis=0)).astype(np.float32)
-    peak_droop_top = (cfg.Vdd - V_top_ss.min(axis=0)).astype(np.float32)
     static_droop_bot = (cfg.Vdd - dc["V_bot"]).astype(np.float32)
-    static_droop_top = (cfg.Vdd - dc["V_top"]).astype(np.float32)
 
     out: dict = {
-        "peak_droop_bot": peak_droop_bot,
-        "peak_droop_top": peak_droop_top,
+        "peak_droop_bot":   peak_droop_bot,
         "static_droop_bot": static_droop_bot,
-        "static_droop_top": static_droop_top,
-        "worst_node_idx": int(np.argmax(peak_droop_bot)),
+        "worst_node_idx":   int(np.argmax(peak_droop_bot)),
         "worst_node_droop": float(peak_droop_bot.max()),
-        "n_loads": int(g.n_loads),
     }
     if keep_full_traj:
         out["V_bot_full"] = V_bot_ss.astype(np.float32)
-        out["V_top_full"] = V_top_ss.astype(np.float32)
         out["t_full"] = res["t"][warmup:].astype(np.float32) - res["t"][warmup]
     return out
 
