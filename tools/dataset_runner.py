@@ -5,12 +5,15 @@ Per-sample warmup length is set by the grid's slowest time constant
 the warmup window the load runs for ``measure_periods`` periods at
 100 steps/period; peak droop is taken over that window.
 
-Each sample yields two label sets:
+Labels are *per load site*: each load lives between a Vdd-bot node and
+a Vss-bot node at the same row on M_bot, and the meaningful droop is
+the local supply rail seen by that load — ``Vdd − (V_vdd − V_vss)``.
+Each sample emits two label vectors of length ``n_loads``:
 
-* ``peak_droop_*`` — dynamic peak droop from the transient solve
-  (``Vdd − V.min`` over the measurement window).
-* ``static_droop_*`` — DC IR drop under the time-averaged load current
-  (``I_peak × duty`` per load). Independent of decap dynamics.
+* ``peak_droop_loads`` — dynamic peak droop from the transient solve
+  (max of ``Vdd − ΔV`` over the measurement window, per load).
+* ``static_droop_loads`` — DC IR drop under the time-averaged load
+  current. Independent of decap dynamics.
 """
 from __future__ import annotations
 
@@ -53,7 +56,7 @@ def run_one(p: dict, keep_full_traj: bool = False, cfg: SimConfig | None = None)
 
     * Global continuous: ``Rsheet_top``, ``Rsheet_bot``, ``wire_width``,
       ``R_via``, ``C_decap``, ``freq``.
-    * Topology: ``pad_pattern``.
+    * Topology: ``n_top``, ``n_bot``.
     * Per-load: ``loads`` (an ``[n_loads, 4]`` array of ``(I_peak, freq,
       duty, phase)``; ``freq`` is the global value broadcast to every
       load). If absent, ``build_regular_pdn`` broadcasts scalar defaults.
@@ -72,7 +75,6 @@ def run_one(p: dict, keep_full_traj: bool = False, cfg: SimConfig | None = None)
         R_via=p["R_via"],
         C_decap=p["C_decap"],
         freq=p["freq"],
-        pad_pattern=p.get("pad_pattern", "corner"),
         loads=p.get("loads"),
     )
 
@@ -86,17 +88,26 @@ def run_one(p: dict, keep_full_traj: bool = False, cfg: SimConfig | None = None)
     warmup = warmup_periods * cfg.steps_per_period
     V_bot_ss = res["V_bot"][warmup:]
 
-    peak_droop_bot = (cfg.Vdd - V_bot_ss.min(axis=0)).astype(np.float32)
-    static_droop_bot = (cfg.Vdd - dc["V_bot"]).astype(np.float32)
+    # Per-load-site rail voltages: ΔV[step, k] = V_bot_vdd[load_k] − V_bot_vss[load_k]
+    vdd_idx = g.load_pairs[:, 0].astype(int)
+    vss_idx = g.load_pairs[:, 1].astype(int)
+    dV_loads_ss = V_bot_ss[:, vdd_idx] - V_bot_ss[:, vss_idx]      # [T, n_loads]
+    peak_droop_loads = (cfg.Vdd - dV_loads_ss.min(axis=0)).astype(np.float32)
+
+    dV_loads_dc = dc["V_bot"][vdd_idx] - dc["V_bot"][vss_idx]
+    static_droop_loads = (cfg.Vdd - dV_loads_dc).astype(np.float32)
 
     out: dict = {
-        "peak_droop_bot":   peak_droop_bot,
-        "static_droop_bot": static_droop_bot,
-        "worst_node_idx":   int(np.argmax(peak_droop_bot)),
-        "worst_node_droop": float(peak_droop_bot.max()),
+        "peak_droop_loads":   peak_droop_loads,
+        "static_droop_loads": static_droop_loads,
+        "worst_load_idx":     int(np.argmax(peak_droop_loads)),
+        "worst_load_droop":   float(peak_droop_loads.max()),
     }
     if keep_full_traj:
-        out["V_bot_full"] = V_bot_ss.astype(np.float32)
+        # Save the per-load-site rail-voltage trajectory rather than the
+        # raw 49-node bot voltages — it's what the downstream analysis
+        # actually plots.
+        out["V_loads_full"] = dV_loads_ss.astype(np.float32)
         out["t_full"] = res["t"][warmup:].astype(np.float32) - res["t"][warmup]
     return out
 

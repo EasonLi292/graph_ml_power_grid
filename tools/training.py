@@ -39,7 +39,7 @@ def train_one_epoch(model, loader, opt, device, grad_clip: float = 1.0) -> float
     for batch in loader:
         batch = batch.to(device)
         pred = model(batch)
-        target = batch["mesh_bot"].y
+        target = batch["y"]
         loss = F.mse_loss(pred, target)
         opt.zero_grad()
         loss.backward()
@@ -54,19 +54,25 @@ def train_one_epoch(model, loader, opt, device, grad_clip: float = 1.0) -> float
 
 @torch.no_grad()
 def evaluate(model, loader, device, target_space: str = "log") -> dict:
+    """Compute aggregate + per-sample-worst-load metrics.
+
+    Per-sample reshape uses ``n_loads`` from the underlying dataset (e.g.
+    14 at our default ``n_bot=7``). All graphs in one loader carry the
+    same number of load sites by construction, so the flat
+    ``[total_loads]`` tensor reshapes cleanly to ``[batch, n_loads]``.
+    """
     model.eval()
+    n_loads = loader.dataset._n_loads
     preds, targets = [], []
     for batch in loader:
         batch = batch.to(device)
         preds.append(model(batch).cpu())
-        targets.append(batch["mesh_bot"].y.cpu())
+        targets.append(batch["y"].cpu())
     pred = torch.cat(preds)
     target = torch.cat(targets)
 
-    # Loss in the training space
     train_space_loss = F.mse_loss(pred, target).item()
 
-    # Convert to linear volts for reportable metrics
     pred_v = _to_linear_volts(pred, target_space)
     target_v = _to_linear_volts(target, target_space)
 
@@ -79,9 +85,8 @@ def evaluate(model, loader, device, target_space: str = "log") -> dict:
     ss_tot = (target_v - target_v.mean()).pow(2).sum().item()
     r2 = 1.0 - ss_res / max(ss_tot, 1e-30)
 
-    # Per-sample worst-node droop
-    pred_per = pred_v.view(-1, 49)
-    target_per = target_v.view(-1, 49)
+    pred_per = pred_v.view(-1, n_loads)
+    target_per = target_v.view(-1, n_loads)
     pred_worst = pred_per.max(dim=1).values
     target_worst = target_per.max(dim=1).values
     worst_err = pred_worst - target_worst

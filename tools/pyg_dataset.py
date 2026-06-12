@@ -1,20 +1,22 @@
-"""PyG ``Dataset`` wrapper around the v4 dataset HDF5.
+"""PyG ``Dataset`` wrapper around the dataset HDF5.
 
-Each sample looks up a per-``n_top`` ``HeteroData`` template, clones it,
-then fills in the per-sample edge-attribute columns:
+Per-sample workflow: look up a ``HeteroData`` template by ``n_top``,
+clone it, fill in the edge attribute columns that vary, and attach the
+target. With the new design only two continuous knobs actually vary
+(``wire_width`` and ``C_decap``); the rest comes from the sampler
+constants stored once at the HDF5 root.
 
-* strap edge ``R`` (top, bot) — derived from the fixed ``Rsheet_*`` and
-  the sample's ``wire_width``;
-* via edge ``R`` — fixed (``R_via``);
-* decap edge ``C`` — the sample's ``C_decap``;
-* load edge ``(I_peak, freq, duty, phase)`` — all fixed; broadcast from
-  the sampler constants (the HDF5 stores them once as a root attribute,
-  not per-sample, since they are invariant by design);
-* ``mesh_bot.y`` — the chosen droop target.
+Targets
+-------
+``y`` is a per-load-site supply droop vector of length ``n_loads`` (12 by
+default at ``n_bot=7``), not the old per-bot-node vector. Each entry is
+``Vdd − (V_bot_vdd[k] − V_bot_vss[k])`` for load ``k``. It lands on the
+``HeteroData`` as ``data["y"]`` (a global tensor, not pinned to any
+node type) since it is one scalar per load *edge*, not per node.
 
-Only two continuous quantities actually vary across samples
-(``wire_width`` and ``C_decap``); ``n_top`` selects which template to
-clone. Everything else is constant by construction.
+The (Vdd, Vss) endpoint indices for the readout are also attached as
+``data["load_endpoints"]`` and ``data["decap_endpoints"]`` by
+``to_hetero_data`` upstream.
 """
 from __future__ import annotations
 
@@ -36,7 +38,6 @@ from .sampler import (
     FIXED_DUTY,
     FIXED_FREQ,
     FIXED_I_PEAK,
-    FIXED_PAD_PATTERN,
     FIXED_PHASE,
     FIXED_R_VIA,
     FIXED_RSHEET_BOT,
@@ -46,11 +47,11 @@ from .sampler import (
 
 Target = Literal["linear", "log"]
 DroopKind = Literal["peak", "static"]
-LOG_FLOOR = 1e-7  # volts; clip to avoid log(0) at the corner pads
+LOG_FLOOR = 1e-7  # volts; clip to avoid log(0) at near-zero droop sites
 
 
 class RegularPDNDataset:
-    """Loads one section of the v4 dataset HDF5.
+    """Loads one section of the dataset HDF5.
 
     Args:
         h5_path: path to the dataset HDF5 file.
@@ -80,19 +81,18 @@ class RegularPDNDataset:
             grp = self._resolve_group(f, split)
             self._global = grp["global_params"][:]            # [N, 2]
             self._n_top  = grp["n_top"][:]                    # [N] int16
-            key = "peak_droop_bot" if droop_kind == "peak" else "static_droop_bot"
-            self._target_y = grp[key][:]                      # [N, n_bot^2]
+            key = "peak_droop_loads" if droop_kind == "peak" else "static_droop_loads"
+            self._target_y = grp[key][:]                      # [N, n_loads]
 
         # Per-n_top template + pitch lookup, computed once.
         self._templates: dict[int, object] = {}
         self._pitch_by_n_top: dict[int, tuple[float, float]] = {}
         for nt in ALL_N_TOP:
-            g = build_regular_pdn(n_top=int(nt), pad_pattern=FIXED_PAD_PATTERN)
+            g = build_regular_pdn(n_top=int(nt))
             self._templates[int(nt)] = to_hetero_data(g)
             self._pitch_by_n_top[int(nt)] = (g.pitch_top, g.pitch_bot)
-        self._n_loads = int(g.n_loads)  # n_loads is invariant across n_top here
+        self._n_loads = int(g.n_loads)  # invariant across n_top by construction
 
-        # Column positions in the global_params row.
         self._ww_col = list(self.GLOBAL_KEYS).index("wire_width")
         self._cd_col = list(self.GLOBAL_KEYS).index("C_decap")
 
@@ -118,7 +118,6 @@ class RegularPDNDataset:
     def __len__(self) -> int:
         return self._global.shape[0]
 
-    # Column indices into the 6-dim edge attribute, cached for speed.
     _R_COL = EDGE_ATTR_COLS.index("R")
     _C_COL = EDGE_ATTR_COLS.index("C")
     _I_COL = EDGE_ATTR_COLS.index("I_peak")
@@ -146,28 +145,24 @@ class RegularPDNDataset:
         wire_width = float(self._global[idx, self._ww_col])
         C_decap    = float(self._global[idx, self._cd_col])
 
-        # Strap and via R columns: Rsheet_* fixed, wire_width varies.
+        # Strap R: Rsheet × pitch / wire_width.
         R_top = FIXED_RSHEET_TOP * (pitch_top / wire_width)
         R_bot = FIXED_RSHEET_BOT * (pitch_bot / wire_width)
         data["mesh_top", "strap", "mesh_top"].edge_attr[:, self._R_COL] = R_top
         data["mesh_bot", "strap", "mesh_bot"].edge_attr[:, self._R_COL] = R_bot
+        # Via R: fixed.
         data["mesh_top", "via", "mesh_bot"].edge_attr[:, self._R_COL] = FIXED_R_VIA
         data["mesh_bot", "via", "mesh_top"].edge_attr[:, self._R_COL] = FIXED_R_VIA
-
-        # Decap C column.
-        data["mesh_bot", "decap", "gnd"].edge_attr[:, self._C_COL] = C_decap
-        data["gnd", "decap", "mesh_bot"].edge_attr[:, self._C_COL] = C_decap
-
-        # Load (I/freq/duty/phase) — all fixed; built from sampler constants.
-        load_attr = self._build_load_attr(self._n_loads)
-        data["mesh_bot", "load", "gnd"].edge_attr = load_attr
-        data["gnd", "load", "mesh_bot"].edge_attr = load_attr.clone()
+        # Decap C (single mesh_bot-internal relation, bidir packed).
+        data["mesh_bot", "decap", "mesh_bot"].edge_attr[:, self._C_COL] = C_decap
+        # Load attr — directed (Vdd→Vss) load relation, one row per load.
+        data["mesh_bot", "load", "mesh_bot"].edge_attr = self._build_load_attr(self._n_loads)
 
         droop = self._target_y[idx]
         if self.target == "log":
             y = np.log10(np.maximum(droop, LOG_FLOOR))
         else:
             y = droop
-        data["mesh_bot"].y = torch.from_numpy(y.astype(np.float32))
+        data["y"] = torch.from_numpy(y.astype(np.float32))
 
         return data

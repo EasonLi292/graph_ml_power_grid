@@ -17,7 +17,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.encoder import EncoderConfig, PDNDroopRegressor
+from eason import EncoderConfig, PDNDroopRegressor
 from tools.training import TrainConfig, evaluate, make_loaders, train
 
 
@@ -33,11 +33,13 @@ def pick_device(arg: str) -> torch.device:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", type=Path, default=Path("datasets/regular_v4/dataset.h5"))
+    ap.add_argument("--data", type=Path, default=Path("datasets/regular_v5/dataset.h5"))
     ap.add_argument("--target", choices=["log", "linear"], default="log")
     ap.add_argument("--hidden-dim", type=int, default=64)
-    ap.add_argument("--n-layers", type=int, default=3)
+    ap.add_argument("--n-layers", type=int, default=7)
     ap.add_argument("--dropout", type=float, default=0.0)
+    ap.add_argument("--drop-edge-p", type=float, default=0.0,
+                    help="DropEdge rate on strap+decap relations (train only).")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=0.0)
     ap.add_argument("--epochs", type=int, default=50)
@@ -59,7 +61,10 @@ def main() -> None:
     )
 
     enc_cfg = EncoderConfig(
-        hidden_dim=args.hidden_dim, n_layers=args.n_layers, dropout=args.dropout
+        hidden_dim=args.hidden_dim,
+        n_layers=args.n_layers,
+        dropout=args.dropout,
+        drop_edge_p=args.drop_edge_p,
     )
     model = PDNDroopRegressor(enc_cfg, target_space=args.target).to(device)
     print(f"params: {sum(p.numel() for p in model.parameters()):,}")
@@ -74,17 +79,21 @@ def main() -> None:
         model, train_loader, val_loader, cfg, device, args.target, ckpt_path=args.ckpt
     )
 
-    # Reload best weights for the test report
+    # Reload best weights for the test report. test_loader holds the
+    # held-out n_top values (TEST_N_TOP), so this is already the
+    # generalization-test number — no separate OOD pass is needed.
     state = torch.load(args.ckpt, map_location=device)
     model.load_state_dict(state["model"])
     test_metrics = evaluate(model, test_loader, device, args.target)
     print("\n== best (val) ==")
     print(json.dumps(best["metrics"], indent=2))
-    print("\n== test (best ckpt) ==")
+    print("\n== test (best ckpt; held-out n_top) ==")
     print(json.dumps(test_metrics, indent=2))
 
     log_path = args.ckpt.with_suffix(".history.json")
-    log_path.write_text(json.dumps({"history": history, "test": test_metrics}, indent=2))
+    log_path.write_text(json.dumps(
+        {"history": history, "test": test_metrics}, indent=2
+    ))
     print(f"history written to {log_path}")
 
 

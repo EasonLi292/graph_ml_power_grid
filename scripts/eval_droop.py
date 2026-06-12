@@ -11,19 +11,21 @@ from torch_geometric.loader import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.encoder import EncoderConfig, PDNDroopRegressor
+from eason import EncoderConfig, PDNDroopRegressor
 from tools.pyg_dataset import RegularPDNDataset
 from tools.training import evaluate
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", type=Path, default=Path("datasets/regular_v4/dataset.h5"))
+    ap.add_argument("--data", type=Path, default=Path("datasets/regular_v5/dataset.h5"))
     ap.add_argument("--ckpt", type=Path, default=Path("checkpoints/droop_regressor.pt"))
-    ap.add_argument("--split", choices=["train", "val", "test"], default="test")
+    # Any split the dataset understands: train/val/test, ood_n_top_<N>,
+    # or sweep:<axis>/n_top_<N>.
+    ap.add_argument("--split", type=str, default="test")
     ap.add_argument("--target", choices=["log", "linear"], default="log")
     ap.add_argument("--hidden-dim", type=int, default=64)
-    ap.add_argument("--n-layers", type=int, default=3)
+    ap.add_argument("--n-layers", type=int, default=7)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--device", type=str, default="cpu")
     args = ap.parse_args()

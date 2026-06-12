@@ -2,21 +2,20 @@
 
 Groups written:
 
-* ``/bulk/{train,val,test}/`` — LHS over ``(wire_width, C_decap)``, uniform
-  discrete ``n_top ∈ TRAIN_N_TOP``. Everything else pinned to the constants
-  in ``tools.sampler``. The model trains and is validated/tested here.
-* ``/ood/n_top_<N>/`` — same continuous LHS, but ``n_top`` fixed to a value
-  in ``OOD_N_TOP``. Test-only: probes topology (supply-density)
-  extrapolation.
+* ``/bulk/{train,val,test}/`` — LHS over ``(wire_width, C_decap)``.
+  Train + val sample ``n_top ∈ TRAIN_N_TOP``; test samples
+  ``n_top ∈ TEST_N_TOP``. Because test draws topologies never seen in
+  training, a passing test score requires the model to read the graph
+  rather than memorize a per-n_top mapping.
 * ``/analysis/sweeps/<axis>/n_top_<N>/`` — 1-D sweep along a continuous
-  axis (``wire_width`` or ``C_decap``), held at the other continuous
-  median, repeated for every ``n_top`` in train + OOD. Used for
+  axis (``wire_width`` or ``C_decap``), the other axis held at its
+  median, repeated for every ``n_top`` in ``ALL_N_TOP``. Used for
   latent-space / sensitivity analysis, not training.
 
 Usage:
     python scripts/build_dataset.py \\
-        --out datasets/regular_v4/dataset.h5 \\
-        --n-train 16000 --n-val 2000 --n-test 2000 --n-ood 2000 \\
+        --out datasets/regular_v5/dataset.h5 \\
+        --n-train 16000 --n-val 2000 --n-test 2000 \\
         --sweep-points 50 --seed 42
 """
 from __future__ import annotations
@@ -35,27 +34,20 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.dataset_runner import SimConfig, run_many
-from tools.grid_construction import build_regular_pdn
+from tools.grid_construction import BOT_COL_PATTERN, build_regular_pdn
 from tools.sampler import (
     ALL_N_TOP,
     FIXED_CONSTANTS,
     FIXED_DUTY,
     FIXED_FREQ,
     FIXED_I_PEAK,
-    FIXED_PAD_PATTERN,
     FIXED_PHASE,
     GLOBAL_RANGES,
-    OOD_N_TOP,
+    TEST_N_TOP,
     TRAIN_N_TOP,
     axis_sweep,
     sample_n_top,
 )
-
-
-# Per-sample load instances and decap sites are placement-invariant in this
-# dataset (corner pads + fixed n_bot + fixed strides); store ``n_loads`` and
-# the constant per-load (I, freq, duty, phase) row as root attributes only,
-# never as per-sample arrays.
 
 
 def _git_sha() -> str:
@@ -67,18 +59,14 @@ def _git_sha() -> str:
         return "unknown"
 
 
-# n_loads is invariant under n_top *and* pad_pattern="corner" — the four
-# corner-pad bot-via positions are the same set for every valid n_top.
-# Compute it once at import time as a sanity-check constant.
 def _check_invariant_n_loads() -> int:
-    counts = {
-        nt: build_regular_pdn(n_top=nt, pad_pattern=FIXED_PAD_PATTERN).n_loads
-        for nt in ALL_N_TOP
-    }
+    """``n_loads`` is constant across every valid ``n_top`` (loads sit
+    on M_bot at fixed (row, boundary) positions). Sanity-check at import
+    time so a future schema change can't silently let it drift."""
+    counts = {nt: build_regular_pdn(n_top=nt).n_loads for nt in ALL_N_TOP}
     if len(set(counts.values())) != 1:
         raise RuntimeError(
-            f"n_loads is supposed to be invariant under n_top with "
-            f"pad_pattern={FIXED_PAD_PATTERN!r}, got {counts}"
+            f"n_loads should be invariant across ALL_N_TOP, got {counts}"
         )
     return next(iter(counts.values()))
 
@@ -94,17 +82,7 @@ def _assemble_sample_dicts(
     global_samples: np.ndarray,
     n_top_per_sample: np.ndarray,
 ) -> list[dict]:
-    """Build the per-sample param dict ``run_one`` consumes.
-
-    Varying inputs:
-      * ``global_samples``: ``[N, len(GLOBAL_RANGES)]`` columns
-        ``(wire_width, C_decap)``.
-      * ``n_top_per_sample``: ``[N]`` int.
-
-    Everything else comes from ``FIXED_CONSTANTS`` and ``FIXED_*`` scalars.
-    Per-load (I_peak, freq, duty, phase) is broadcast identically to every
-    one of the ``N_LOADS`` instances.
-    """
+    """Build the per-sample param dict ``run_one`` consumes."""
     out = []
     name_idx = {n: i for i, n in enumerate(GLOBAL_RANGES.names)}
     for i in range(global_samples.shape[0]):
@@ -122,23 +100,22 @@ def _assemble_sample_dicts(
 
 
 def _stack_results(results: list[dict]) -> dict[str, np.ndarray]:
-    """Stack the n_bot-invariant fields (droop maps + scalar summaries)."""
     return {
-        "peak_droop_bot":   np.stack([r["peak_droop_bot"]   for r in results]),
-        "static_droop_bot": np.stack([r["static_droop_bot"] for r in results]),
-        "worst_node_idx":   np.array([r["worst_node_idx"]   for r in results], dtype=np.int32),
-        "worst_node_droop": np.array([r["worst_node_droop"] for r in results], dtype=np.float32),
+        "peak_droop_loads":   np.stack([r["peak_droop_loads"]   for r in results]),
+        "static_droop_loads": np.stack([r["static_droop_loads"] for r in results]),
+        "worst_load_idx":     np.array([r["worst_load_idx"]     for r in results], dtype=np.int32),
+        "worst_load_droop":   np.array([r["worst_load_droop"]   for r in results], dtype=np.float32),
     }
 
 
 def _collect_traj_subset(results: list[dict], subset_idx: list[int]) -> dict | None:
-    kept = [results[i] for i in subset_idx if "V_bot_full" in results[i]]
+    kept = [results[i] for i in subset_idx if "V_loads_full" in results[i]]
     if not kept:
         return None
     return {
         "indices": np.array(subset_idx, dtype=np.int32),
-        "V_bot": np.stack([r["V_bot_full"] for r in kept]).astype(np.float32),
-        "t":     kept[0]["t_full"].astype(np.float32),
+        "V_loads": np.stack([r["V_loads_full"] for r in kept]).astype(np.float32),
+        "t":       kept[0]["t_full"].astype(np.float32),
     }
 
 
@@ -155,7 +132,6 @@ def generate_split(
     n_workers: int,
     subset_size: int = 0,
 ) -> dict:
-    """One split. Continuous LHS over ``GLOBAL_RANGES`` × uniform discrete n_top."""
     print(f"[{name}] sampling {n} points (seed={seed}) over n_top={n_top_choices}...")
     global_samples = GLOBAL_RANGES.lhs(n, seed=seed)
     n_top_per = sample_n_top(n, seed=seed + 100_000, choices=n_top_choices)
@@ -184,8 +160,6 @@ def generate_sweep(
     cfg: SimConfig,
     n_workers: int,
 ) -> dict:
-    """1-D sweep along a continuous axis; the other continuous knob held at
-    its median; ``n_top`` fixed."""
     axis_vals, medians = axis_sweep(axis, n_points)
 
     global_samples = np.zeros((n_points, GLOBAL_RANGES.d), dtype=np.float64)
@@ -229,27 +203,27 @@ def _write_split(grp: h5py.Group, payload: dict) -> None:
 def write_dataset(
     out_path: Path,
     bulk: dict[str, dict],
-    ood: dict[int, dict],
     sweeps: dict[str, dict[int, dict]],
     cfg: SimConfig,
     seed: int,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(out_path, "w") as f:
-        f.attrs["version"]    = 4
+        f.attrs["version"]    = 5
         f.attrs["seed"]       = seed
         f.attrs["created_at"] = datetime.now().isoformat()
         f.attrs["git_sha"]    = _git_sha()
 
         f.attrs["global_param_names"] = json.dumps(list(GLOBAL_RANGES.names))
         f.attrs["train_n_top"]        = json.dumps(list(TRAIN_N_TOP))
-        f.attrs["ood_n_top"]          = json.dumps(list(OOD_N_TOP))
+        f.attrs["test_n_top"]         = json.dumps(list(TEST_N_TOP))
+        f.attrs["bot_col_pattern"]    = json.dumps(list(BOT_COL_PATTERN))
         f.attrs["n_loads"]            = int(N_LOADS)
         f.attrs["load_attr_row"]      = json.dumps(
             {"I_peak": FIXED_I_PEAK, "freq": FIXED_FREQ, "duty": FIXED_DUTY, "phase": FIXED_PHASE}
         )
         f.attrs["fixed_constants"]    = json.dumps(FIXED_CONSTANTS)
-        f.attrs["param_ranges"] = json.dumps(
+        f.attrs["param_ranges"]       = json.dumps(
             {"global": [(p.lo, p.hi, p.scale) for p in GLOBAL_RANGES.params]}
         )
         f.attrs["sim_config"] = json.dumps(
@@ -262,32 +236,28 @@ def write_dataset(
             }
         )
 
-        # One topology block per n_top (n_bot, pitch, decap/load attachments
-        # are needed by the downstream PyG loader).
         topo = {}
         for nt in ALL_N_TOP:
-            g_t = build_regular_pdn(n_top=nt, pad_pattern=FIXED_PAD_PATTERN)
+            g_t = build_regular_pdn(n_top=nt)
             topo[str(nt)] = {
-                "n_top":                nt,
-                "n_bot":                g_t.n_bot,
-                "pitch_top":            g_t.pitch_top,
-                "pitch_bot":            g_t.pitch_bot,
-                "n_loads":              g_t.n_loads,
-                "n_decaps":             g_t.n_decaps,
-                "n_vias":               int(g_t.via_pairs.shape[0]),
-                "vdd_pad_top_idx":      g_t.vdd_pad_top_idx.tolist(),
-                "load_attach_bot_idx":  g_t.load_attach_bot_idx.tolist(),
-                "decap_attach_bot_idx": g_t.decap_attach_bot_idx.tolist(),
+                "n_top":              nt,
+                "n_bot":              g_t.n_bot,
+                "pitch_top":          g_t.pitch_top,
+                "pitch_bot":          g_t.pitch_bot,
+                "n_loads":            g_t.n_loads,
+                "n_decaps":           g_t.n_decaps,
+                "n_vias":             int(g_t.via_pairs.shape[0]),
+                "vdd_pad_top_idx":    g_t.vdd_pad_top_idx.tolist(),
+                "vss_pad_top_idx":    g_t.vss_pad_top_idx.tolist(),
+                "top_is_vdd":         g_t.top_is_vdd.tolist(),
+                "load_pairs":         g_t.load_pairs.tolist(),
+                "decap_pairs":        g_t.decap_pairs.tolist(),
             }
         f.attrs["topology"] = json.dumps(topo)
 
         bulk_grp = f.create_group("bulk")
         for split_name, payload in bulk.items():
             _write_split(bulk_grp.create_group(split_name), payload)
-
-        ood_grp = f.create_group("ood")
-        for nt, payload in ood.items():
-            _write_split(ood_grp.create_group(f"n_top_{nt}"), payload)
 
         if sweeps:
             sweep_grp = f.create_group("analysis").create_group("sweeps")
@@ -305,16 +275,15 @@ def write_dataset(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", type=Path, default=Path("datasets/regular_v4/dataset.h5"))
-    ap.add_argument("--n-train",       type=int, default=16000)
-    ap.add_argument("--n-val",         type=int, default=2000)
-    ap.add_argument("--n-test",        type=int, default=2000)
-    ap.add_argument("--n-ood",         type=int, default=2000)
-    ap.add_argument("--sweep-points",  type=int, default=50,
+    ap.add_argument("--out", type=Path, default=Path("datasets/regular_v5/dataset.h5"))
+    ap.add_argument("--n-train",      type=int, default=16000)
+    ap.add_argument("--n-val",        type=int, default=2000)
+    ap.add_argument("--n-test",       type=int, default=2000)
+    ap.add_argument("--sweep-points", type=int, default=50,
                     help="Per-axis-per-n_top; 0 disables sweeps.")
-    ap.add_argument("--seed",          type=int, default=42)
-    ap.add_argument("--n-workers",     type=int, default=None)
-    ap.add_argument("--subset-size",   type=int, default=200,
+    ap.add_argument("--seed",         type=int, default=42)
+    ap.add_argument("--n-workers",    type=int, default=None)
+    ap.add_argument("--subset-size",  type=int, default=200,
                     help="Train-only: how many samples retain full V(t).")
     args = ap.parse_args()
 
@@ -331,17 +300,10 @@ def main() -> None:
             seed=args.seed + 1, cfg=cfg, n_workers=args.n_workers,
         ),
         "test": generate_split(
-            "test", args.n_test, TRAIN_N_TOP,
+            "test", args.n_test, TEST_N_TOP,
             seed=args.seed + 2, cfg=cfg, n_workers=args.n_workers,
         ),
     }
-
-    ood: dict[int, dict] = {}
-    for nt in OOD_N_TOP:
-        ood[nt] = generate_split(
-            f"ood_n_top_{nt}", args.n_ood, (nt,),
-            seed=args.seed + 1000 + nt, cfg=cfg, n_workers=args.n_workers,
-        )
 
     sweeps: dict[str, dict[int, dict]] = {}
     if args.sweep_points > 0:
@@ -356,7 +318,7 @@ def main() -> None:
                     cfg=cfg, n_workers=args.n_workers,
                 )
 
-    write_dataset(args.out, bulk, ood, sweeps, cfg, seed=args.seed)
+    write_dataset(args.out, bulk, sweeps, cfg, seed=args.seed)
 
 
 if __name__ == "__main__":

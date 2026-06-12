@@ -1,65 +1,94 @@
-"""Build heterogeneous PDN graphs.
+"""Build the heterogeneous PDN graph for the two-rail (Vdd + Vss) design.
 
-The builder produces a framework-agnostic ``PDNGraph`` (numpy + scalars).
-``to_hetero_data`` converts it to a PyG ``HeteroData`` for the ML pipeline
-(lazy import — solver-side ground-truth generation does not need torch).
+Physical model
+--------------
+Two metal layers, ``M_top`` (coarse, ``n_top × n_top`` intersections) and
+``M_bot`` (fine, ``n_bot × n_bot``). Both layers carry strips running in
+the same direction (vertical); each column is one net (Vdd or Vss) end
+to end. This deliberately avoids the perpendicular-strip aliasing trap
+where the step-N via mapping only hits one net's columns.
 
-Indexing convention: row-major. Node ``i`` of an n×n mesh sits at
-``(row, col) = (i // n, i % n)``.
+Bot-mesh column pattern is fixed at the period-4 pattern ``V V G G V V G``
+for ``n_bot = 7`` (cols 0,1,4,5 Vdd; cols 2,3,6 Vss). The top-mesh column
+pattern is derived from the bot pattern by sampling at the via step::
 
-Geometry vs. circuit
---------------------
-Per-segment resistances ``R_top`` and ``R_bot`` are not free parameters of
-the regular grid — they are derived from sheet resistance and strap
-geometry::
+    step = (n_bot - 1) // (n_top - 1)
+    top_col_net[c] = bot_col_net[c * step]
 
-    R_seg = Rsheet × (segment_length / wire_width)
+so vias are *always same-net* by construction, for every valid ``n_top``
+in ``{2, 3, 4, 7}``.
 
-where ``segment_length`` is the mesh pitch on that layer. The top mesh
-is coarser than the bottom mesh, so ``pitch_top > pitch_bot`` and the
-top-layer per-segment R picks up that geometric factor automatically.
-``build_regular_pdn`` does this derivation; downstream code (solver, GNN)
-sees the derived per-segment scalars.
+Within-layer edges
+~~~~~~~~~~~~~~~~~~
+* **Vertical straps** between consecutive rows of the same column (always
+  same net).
+* **Horizontal rungs** between adjacent columns at the same row, only
+  when both columns are the same net. The rungs give a 2D mesh per net
+  for current spreading; Vdd↔Vss adjacencies have no rung (that would
+  short the supply).
 
-Pad patterns
-------------
-``pad_pattern`` selects how Vdd is supplied to the top mesh. For the
-default 4×4 M_top:
+Cross-layer / cross-net edges
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* **Vias** at ``(top_r, top_c) ↔ (top_r·step, top_c·step)``. Same-net by
+  construction.
+* **Decaps** on ``M_bot`` between every Vdd-Vss column pair at every
+  row in the decap stride set. Period-4 pattern → boundary col pairs
+  ``(1,2), (3,4), (5,6)``.
+* **Loads** on ``M_bot`` at the same column-pair boundaries, on a
+  *different* row stride set so loads and decaps don't sit on top of
+  each other.
 
-* ``"corner"``      — 4 corners (worst-case, far-from-pad center droop).
-* ``"checker"``     — 8 alternating M_top nodes ((r + c) % 2 == 0).
-* ``"edge_strip"``  — all 12 boundary nodes (no interior pads).
-* ``"distributed"`` — 4 corners + interior 2×2 = 8 pads, mixed.
+Pads
+~~~~
+Every row-0 node on ``M_top`` is a bump (``is_pad = 1``) — one bump per
+column. Their nets are read from the column pattern, so each Vdd column
+gets a Vdd bump and each Vss column gets a Vss bump. (Using only "4
+corner" bumps would leave one of the nets entirely floating at most
+``n_top`` values for our bot pattern.)
 
-Loads that sit directly on a Vdd-pad via are filtered out — those nodes
-are effectively tied to Vdd and don't represent realistic instance
-placement. The number of surviving loads therefore varies per pattern.
-
-Per-load heterogeneity
-----------------------
-Each load may draw its own ``(I_peak, freq, duty, phase)`` waveform. The
-sample-level convention is a single global ``freq`` (one clock domain)
-with ``(I_peak, duty, phase)`` varying per load. ``build_regular_pdn``
-accepts either a precomputed ``loads`` array ``[n_loads, 4]`` or scalar
-defaults that get broadcast to every load.
+Returns: a framework-agnostic ``PDNGraph`` (numpy + scalars).
+``to_hetero_data`` converts it to PyG ``HeteroData`` (lazy import).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 import numpy as np
 
 
-PadPattern = Literal["corner", "checker", "edge_strip", "distributed"]
-PAD_PATTERNS: tuple[PadPattern, ...] = ("corner", "checker", "edge_strip", "distributed")
+# Bot column pattern is fixed across the dataset: V V G G V V V for
+# n_bot=7. The "3-cluster" choice (Vdd{0,1}, Vss{2,3}, Vdd{4,5,6}) gives
+# 2 cross-net boundaries while keeping every cluster reachable from the
+# via tap-sets at n_top ∈ {3, 4, 7}::
+#
+#   n_top=7 (step=1)  taps  {0,1,2,3,4,5,6}  → every cluster ✓
+#   n_top=4 (step=2)  taps  {0, 2, 4, 6}     → every cluster ✓
+#   n_top=3 (step=3)  taps  {0, 3, 6}        → every cluster ✓
+#
+# n_top=2 (step=6) is *not* supported by this pattern (taps only {0, 6},
+# both Vdd, so the Vss cluster {2,3} would float). The single-boundary
+# pattern V V V V G G G covers n_top=2 too but at the cost of half the
+# load sites and (empirically) worse generalization — the n_top=2 graph
+# is geometrically too far from n_top=4 to anchor it.
+# 1 = Vdd, 0 = Vss.
+BOT_COL_PATTERN: tuple[int, ...] = (1, 1, 0, 0, 1, 1, 1)
+
+# Stride-1, offset-0 on both: every row carries one load and one decap
+# at the single Vdd↔Vss boundary. 1 boundary × 7 rows = 7 of each.
+# Loads and decaps overlap at the same (row, boundary), which is fine
+# electrically — they're two parallel branches between the same Vdd
+# and Vss bot nodes, the way a real cell row mixes switching cells and
+# decap fillers.
+DECAP_ROW_STRIDE: int = 1
+DECAP_ROW_OFFSET: int = 0
+LOAD_ROW_STRIDE: int = 1
+LOAD_ROW_OFFSET: int = 0
 
 
 @dataclass
 class PDNGraph:
     n_top: int
     n_bot: int
-
     Vdd: float
 
     # Geometry (length units arbitrary; only ratios enter the circuit).
@@ -67,8 +96,8 @@ class PDNGraph:
     pitch_bot: float
     wire_width: float
 
-    # Sheet resistance and the derived per-segment scalars actually stamped
-    # by the solver / fed to the GNN.
+    # Sheet resistance + derived per-segment scalars actually stamped by
+    # the solver / fed to the GNN.
     Rsheet_top: float
     Rsheet_bot: float
     R_top: float
@@ -76,22 +105,37 @@ class PDNGraph:
     R_via: float
     C_decap: float
 
-    # Per-load waveform parameters: [n_loads, 4] = (I_peak, freq, duty, phase).
-    # ``freq`` is broadcast from the single global clock in the standard
-    # dataset, but the solver doesn't assume that — it processes loads
-    # independently.
+    # Per-load waveforms: [n_loads, 4] = (I_peak, freq, duty, phase).
     loads: np.ndarray = field(default_factory=lambda: np.empty((0, 4), dtype=float))
 
-    pad_pattern: PadPattern = "corner"
+    # Per-node net assignment: 1 = Vdd, 0 = Vss. Index matches row-major
+    # node ordering within each mesh.
+    top_is_vdd: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int8))
+    bot_is_vdd: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int8))
 
+    # Per-node pad flag (1 only at the corner bumps of M_top).
+    top_is_pad: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int8))
+
+    # Top-mesh node indices that act as Vdd / Vss bumps (subsets of the
+    # 4 corners). Kept as separate arrays so the solver can clamp them
+    # to Vdd / 0 respectively.
     vdd_pad_top_idx: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
-    via_pairs: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=int))
-    load_attach_bot_idx: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
-    decap_attach_bot_idx: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    vss_pad_top_idx: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
 
+    # Within-layer strap edges (vertical + same-net rungs). Both arrays
+    # are (E, 2) of (u, v) endpoint indices into the per-layer node list.
     top_edges: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=int))
     bot_edges: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=int))
 
+    # Cross-layer vias: (top_idx, bot_idx) pairs.
+    via_pairs: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=int))
+
+    # Cross-net decap and load endpoints (Vdd-side, Vss-side) on M_bot.
+    # Each row k is one device between bot[u] (Vdd) and bot[v] (Vss).
+    decap_pairs: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=int))
+    load_pairs: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=int))
+
+    # Shared positions per mesh.
     top_pos: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
     bot_pos: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
 
@@ -105,55 +149,91 @@ class PDNGraph:
 
     @property
     def n_loads(self) -> int:
-        return int(self.load_attach_bot_idx.shape[0])
+        return int(self.load_pairs.shape[0])
 
     @property
     def n_decaps(self) -> int:
-        return int(self.decap_attach_bot_idx.shape[0])
+        return int(self.decap_pairs.shape[0])
 
 
-def _mesh_edges(n: int) -> np.ndarray:
-    """Undirected (u, v) edges of an n×n mesh in row-major indexing."""
-    edges = []
+def _bot_col_pattern(n_bot: int) -> np.ndarray:
+    """Return the fixed Vdd/Vss column pattern for the bot mesh."""
+    if n_bot != 7:
+        raise ValueError(
+            f"BOT_COL_PATTERN is hard-coded for n_bot=7; got {n_bot}. "
+            f"Extend BOT_COL_PATTERN if you change n_bot."
+        )
+    return np.asarray(BOT_COL_PATTERN, dtype=np.int8)
+
+
+def _top_col_pattern(n_top: int, n_bot: int, bot_pat: np.ndarray) -> np.ndarray:
+    """Sample the bot column pattern at the via step to get top pattern.
+
+    Same-net via alignment is automatic: top col c shares net with bot col
+    ``c * step``.
+    """
+    if n_top > 1 and (n_bot - 1) % (n_top - 1) != 0:
+        raise ValueError(
+            f"(n_bot - 1) must be a multiple of (n_top - 1); got n_top={n_top}, n_bot={n_bot}"
+        )
+    step = (n_bot - 1) // max(n_top - 1, 1)
+    return np.asarray([bot_pat[c * step] for c in range(n_top)], dtype=np.int8)
+
+
+def _per_layer_edges(n: int, col_is_vdd: np.ndarray) -> np.ndarray:
+    """Vertical column straps + horizontal same-net rungs for an n×n mesh.
+
+    * Vertical: every (r, c) ↔ (r+1, c). Always same-net (one column = one net).
+    * Horizontal: (r, c) ↔ (r, c+1) only if columns c and c+1 are the same net.
+    """
+    edges: list[tuple[int, int]] = []
     for r in range(n):
         for c in range(n):
             i = r * n + c
-            if c + 1 < n:
-                edges.append((i, i + 1))
+            # vertical
             if r + 1 < n:
                 edges.append((i, i + n))
+            # horizontal rung, same-net only
+            if c + 1 < n and col_is_vdd[c] == col_is_vdd[c + 1]:
+                edges.append((i, i + 1))
     return np.asarray(edges, dtype=int) if edges else np.empty((0, 2), dtype=int)
 
 
-def _pad_indices(pattern: PadPattern, n_top: int) -> np.ndarray:
-    """Top-mesh node indices that act as Vdd supply pads for ``pattern``."""
-    if pattern == "corner":
-        if n_top < 2:
-            return np.array([0], dtype=int)
-        return np.array(
-            [0, n_top - 1, n_top * (n_top - 1), n_top * n_top - 1], dtype=int
-        )
-    if pattern == "checker":
-        idx = [r * n_top + c for r in range(n_top) for c in range(n_top) if (r + c) % 2 == 0]
-        return np.asarray(idx, dtype=int)
-    if pattern == "edge_strip":
-        idx = [
-            r * n_top + c
-            for r in range(n_top)
-            for c in range(n_top)
-            if r == 0 or r == n_top - 1 or c == 0 or c == n_top - 1
-        ]
-        return np.asarray(idx, dtype=int)
-    if pattern == "distributed":
-        # 4 corners + interior 2×2 (for n_top=4: corners {0,3,12,15} + interior
-        # {5,6,9,10}). For other n_top, fall back to corners + a central
-        # 2×2 block around (n_top/2, n_top/2).
-        corners = [0, n_top - 1, n_top * (n_top - 1), n_top * n_top - 1] if n_top >= 2 else [0]
-        c0 = (n_top - 2) // 2 if n_top >= 4 else 0
-        interior = [(c0 + dr) * n_top + (c0 + dc) for dr in (0, 1) for dc in (0, 1)] if n_top >= 4 else []
-        idx = sorted(set(corners + interior))
-        return np.asarray(idx, dtype=int)
-    raise ValueError(f"unknown pad_pattern: {pattern!r}")
+def _via_pairs(n_top: int, n_bot: int) -> np.ndarray:
+    """Top↔bot via pairs at the step mapping (same-net by construction)."""
+    step = (n_bot - 1) // max(n_top - 1, 1) if n_top > 1 else 0
+    pairs: list[tuple[int, int]] = []
+    for r in range(n_top):
+        for c in range(n_top):
+            ti = r * n_top + c
+            bi = (r * step) * n_bot + (c * step)
+            pairs.append((ti, bi))
+    return np.asarray(pairs, dtype=int)
+
+
+def _cross_net_pairs_on_bot(
+    n_bot: int,
+    bot_col_is_vdd: np.ndarray,
+    row_stride: int,
+    row_offset: int,
+) -> np.ndarray:
+    """Cross-net (Vdd, Vss) bot node pairs at Vdd→Vss column boundaries.
+
+    For our period-4 bot pattern, the boundaries are (cols (1,2), (3,4),
+    (5,6)). At every row in the chosen stride set, emit one pair per
+    boundary with the Vdd col first.
+    """
+    pairs: list[tuple[int, int]] = []
+    boundaries: list[tuple[int, int]] = []
+    for c in range(n_bot - 1):
+        a, b = bot_col_is_vdd[c], bot_col_is_vdd[c + 1]
+        if a != b:
+            vdd_c, vss_c = (c, c + 1) if a == 1 else (c + 1, c)
+            boundaries.append((vdd_c, vss_c))
+    for r in range(row_offset, n_bot, row_stride):
+        for vdd_c, vss_c in boundaries:
+            pairs.append((r * n_bot + vdd_c, r * n_bot + vss_c))
+    return np.asarray(pairs, dtype=int) if pairs else np.empty((0, 2), dtype=int)
 
 
 def build_regular_pdn(
@@ -170,38 +250,27 @@ def build_regular_pdn(
     duty: float = 0.5,
     phase: float = 0.0,
     loads: np.ndarray | None = None,
-    pad_pattern: PadPattern = "corner",
-    load_stride: int = 2,
-    decap_stride: int = 2,
-    decap_offset: int = 1,
 ) -> PDNGraph:
-    """Build the maximally-regular 2-layer PDN.
-
-    Defaults: 4×4 M_top, 7×7 M_bot (via step=2 aligns cleanly), 4 corner
-    pads, loads on the even M_bot sub-grid, decaps on the odd sub-grid.
-    Loads coincident with a Vdd-pad via are removed.
+    """Build the two-rail PDN graph.
 
     Per-segment R is derived from sheet resistance + geometry::
 
         R_top = Rsheet_top × (pitch_top / wire_width)
         R_bot = Rsheet_bot × (pitch_bot / wire_width)
 
-    If ``loads`` is supplied, it must be a ``[n_loads_after_filtering, 4]``
-    array of per-load ``(I_peak, freq, duty, phase)``. Otherwise the
-    scalar defaults are broadcast to every load.
+    ``loads`` is an optional ``[n_loads, 4]`` array of per-load
+    ``(I_peak, freq, duty, phase)``; if omitted, the scalar defaults are
+    broadcast to every load.
     """
-    if n_top > 1 and (n_bot - 1) % (n_top - 1) != 0:
-        raise ValueError(
-            f"(n_bot-1) must be a multiple of (n_top-1) for clean via alignment; "
-            f"got n_top={n_top}, n_bot={n_bot}."
-        )
-    if pad_pattern not in PAD_PATTERNS:
-        raise ValueError(f"pad_pattern must be one of {PAD_PATTERNS}, got {pad_pattern!r}")
     if wire_width <= 0:
         raise ValueError(f"wire_width must be positive, got {wire_width}")
 
-    top_edges = _mesh_edges(n_top)
-    bot_edges = _mesh_edges(n_bot)
+    bot_pat = _bot_col_pattern(n_bot)
+    top_pat = _top_col_pattern(n_top, n_bot, bot_pat)
+
+    # Per-node net assignment (row-major).
+    top_is_vdd = np.tile(top_pat, n_top).reshape(n_top, n_top).ravel()
+    bot_is_vdd = np.tile(bot_pat, n_bot).reshape(n_bot, n_bot).ravel()
 
     pitch_bot = 1.0
     pitch_top = pitch_bot * (n_bot - 1) / max(n_top - 1, 1)
@@ -217,39 +286,27 @@ def build_regular_pdn(
         dtype=float,
     )
 
-    vdd_pad_top_idx = _pad_indices(pad_pattern, n_top)
+    # Pad bumps at row 0 of every top column — one bump per column. Each
+    # bump's net follows the column's net pattern, so every net is
+    # guaranteed at least one clamp regardless of the column pattern.
+    pad_nodes = np.arange(n_top, dtype=int)  # row-0 nodes of an n_top × n_top mesh
+    top_is_pad = np.zeros(n_top * n_top, dtype=np.int8)
+    top_is_pad[pad_nodes] = 1
+    vdd_pad_top_idx = pad_nodes[top_is_vdd[pad_nodes] == 1].astype(int)
+    vss_pad_top_idx = pad_nodes[top_is_vdd[pad_nodes] == 0].astype(int)
 
-    step = (n_bot - 1) // max(n_top - 1, 1) if n_top > 1 else 0
-    via_pairs = []
-    for r in range(n_top):
-        for c in range(n_top):
-            ti = r * n_top + c
-            br, bc = r * step, c * step
-            via_pairs.append((ti, br * n_bot + bc))
-    via_pairs = np.asarray(via_pairs, dtype=int)
+    top_edges = _per_layer_edges(n_top, top_pat)
+    bot_edges = _per_layer_edges(n_bot, bot_pat)
+    via_pairs = _via_pairs(n_top, n_bot)
 
-    pad_set = set(int(i) for i in vdd_pad_top_idx)
-    pad_via_bot = {int(b) for t, b in via_pairs if int(t) in pad_set}
-
-    load_lattice = [
-        r * n_bot + c
-        for r in range(0, n_bot, load_stride)
-        for c in range(0, n_bot, load_stride)
-    ]
-    load_attach = np.asarray(
-        [i for i in load_lattice if i not in pad_via_bot], dtype=int
+    decap_pairs = _cross_net_pairs_on_bot(
+        n_bot, bot_pat, DECAP_ROW_STRIDE, DECAP_ROW_OFFSET
+    )
+    load_pairs = _cross_net_pairs_on_bot(
+        n_bot, bot_pat, LOAD_ROW_STRIDE, LOAD_ROW_OFFSET
     )
 
-    decap_attach = np.asarray(
-        [
-            r * n_bot + c
-            for r in range(decap_offset, n_bot, decap_stride)
-            for c in range(decap_offset, n_bot, decap_stride)
-        ],
-        dtype=int,
-    )
-
-    n_loads = load_attach.shape[0]
+    n_loads = load_pairs.shape[0]
     if loads is None:
         loads_arr = np.tile(
             np.array([[I_peak, freq, duty, phase]], dtype=float), (n_loads, 1)
@@ -258,8 +315,7 @@ def build_regular_pdn(
         loads_arr = np.asarray(loads, dtype=float)
         if loads_arr.shape != (n_loads, 4):
             raise ValueError(
-                f"loads shape {loads_arr.shape} != expected ({n_loads}, 4) for "
-                f"pad_pattern={pad_pattern!r}"
+                f"loads shape {loads_arr.shape} != expected ({n_loads}, 4)"
             )
 
     return PDNGraph(
@@ -276,99 +332,94 @@ def build_regular_pdn(
         R_via=R_via,
         C_decap=C_decap,
         loads=loads_arr,
-        pad_pattern=pad_pattern,
+        top_is_vdd=top_is_vdd.astype(np.int8),
+        bot_is_vdd=bot_is_vdd.astype(np.int8),
+        top_is_pad=top_is_pad,
         vdd_pad_top_idx=vdd_pad_top_idx,
-        via_pairs=via_pairs,
-        load_attach_bot_idx=load_attach,
-        decap_attach_bot_idx=decap_attach,
+        vss_pad_top_idx=vss_pad_top_idx,
         top_edges=top_edges,
         bot_edges=bot_edges,
+        via_pairs=via_pairs,
+        decap_pairs=decap_pairs,
+        load_pairs=load_pairs,
         top_pos=top_pos,
         bot_pos=bot_pos,
     )
 
 
 # Edge attribute layout, shared across every relation:
-#   col 0 — R (resistance, Ω) — non-zero for strap and via edges
-#   col 1 — C (capacitance, F) — non-zero for decap edges
+#   col 0 — R (resistance, Ω)  — non-zero for strap and via
+#   col 1 — C (capacitance, F) — non-zero for decap
 #   col 2 — I_peak (A)        ┐
 #   col 3 — freq (Hz)         │
-#   col 4 — duty (fraction)   │ non-zero for load edges
+#   col 4 — duty (fraction)   │ non-zero for load
 #   col 5 — phase (∈ [0, 1])  ┘
 EDGE_ATTR_DIM = 6
 EDGE_ATTR_COLS = ("R", "C", "I_peak", "freq", "duty", "phase")
 
-# Node feature layout: [one_hot(node_type, 3), payload(3)] → uniform 6-dim,
-# so the node-type signal survives the input projection (no per-type Linear
-# can erase it).
+# Node feature layout: [one_hot_type(2), is_vdd, is_pad, x, y]. The
+# one-hot type signal survives the input projection so the encoder can
+# always tell which layer a node is on; ``is_vdd`` carries the net.
 NODE_FEATURE_DIM = 6
-NODE_TYPE_IDX = {"mesh_top": 0, "mesh_bot": 1, "gnd": 2}
+NODE_TYPE_IDX = {"mesh_top": 0, "mesh_bot": 1}
 
 
 def to_hetero_data(g: PDNGraph):
     """Convert a ``PDNGraph`` to a ``torch_geometric.data.HeteroData``.
 
-    Three node types (``mesh_top``, ``mesh_bot``, ``gnd``). Loads are
-    encoded as edges between ``mesh_bot`` and ``gnd``, not as nodes — the
-    load is electrically a two-terminal element, so it belongs on an edge.
+    Two node types — ``mesh_top``, ``mesh_bot`` — and four logical
+    relations carrying the same 6-dim edge attribute schema
+    ``EDGE_ATTR_COLS``::
 
-    Five logical bidirectional relations, all carrying the same 6-dim
-    edge attribute schema ``EDGE_ATTR_COLS``::
+        within-layer same-net mesh:
+            mesh_top ↔ mesh_top   strap  (R only)
+            mesh_bot ↔ mesh_bot   strap  (R only)
 
-        mesh_top ↔ mesh_top   strap  (R only)
-        mesh_bot ↔ mesh_bot   strap  (R only)
-        mesh_top ↔ mesh_bot   via    (R only)
-        mesh_bot ↔ gnd        decap  (C only)
-        mesh_bot ↔ gnd        load   (I_peak, freq, duty, phase)
+        cross-layer same-net via:
+            mesh_top ↔ mesh_bot   via    (R only)
 
-    Cross-type bidirectionality is expressed as two PyG relations sharing
-    the same relation name (e.g. ``("mesh_top", "via", "mesh_bot")`` and
-    ``("mesh_bot", "via", "mesh_top")``); same-type bidirectionality is a
-    single relation with both directions packed into ``edge_index``.
+        cross-net devices (on M_bot, Vdd-Vss pairs at the same row):
+            mesh_bot ↔ mesh_bot   decap  (C only)
+            mesh_bot ↔ mesh_bot   load   (I_peak, freq, duty, phase)
 
-    The load edge is a *current source*, not a resistor — its attribute
-    encodes the time-varying current draw. Solver-side, this is stamped
-    as an injection at the ``mesh_bot`` attachment node, with the return
-    closing through ``gnd``.
+    Same-layer bidir is packed into a single ``edge_index``; cross-layer
+    via is two PyG relations sharing the ``via`` name. Decap and load
+    each live within ``mesh_bot`` and are also packed bidir (the
+    encoder's message passing is symmetric in src/dst).
     """
     import torch
     from torch_geometric.data import HeteroData
 
     data = HeteroData()
 
-    # ----- nodes (uniform 6-dim feature: [one_hot(3), payload(3)]) -----
-    def _node_features(node_type: str, payload: np.ndarray) -> np.ndarray:
-        n = payload.shape[0]
-        one_hot = np.zeros((n, 3), dtype=np.float32)
+    def _node_features(node_type: str, pos: np.ndarray, is_vdd: np.ndarray, is_pad: np.ndarray) -> np.ndarray:
+        n = pos.shape[0]
+        one_hot = np.zeros((n, 2), dtype=np.float32)
         one_hot[:, NODE_TYPE_IDX[node_type]] = 1.0
-        return np.column_stack([one_hot, payload.astype(np.float32)])
+        feat = np.column_stack([
+            one_hot,
+            is_vdd.astype(np.float32),
+            is_pad.astype(np.float32),
+            pos.astype(np.float32),
+        ])
+        return feat
 
-    is_pad = np.zeros((g.n_top_nodes, 1), dtype=np.float32)
-    is_pad[g.vdd_pad_top_idx, 0] = 1.0
-    top_payload = np.column_stack([g.top_pos.astype(np.float32), is_pad])  # [n_top, 3]
-    data["mesh_top"].x = torch.from_numpy(_node_features("mesh_top", top_payload))
-
-    bot_payload = np.column_stack([
-        g.bot_pos.astype(np.float32),
-        np.zeros((g.n_bot_nodes, 1), dtype=np.float32),
-    ])  # [n_bot, 3]
-    data["mesh_bot"].x = torch.from_numpy(_node_features("mesh_bot", bot_payload))
-
-    data["gnd"].x = torch.from_numpy(
-        _node_features("gnd", np.zeros((1, 3), dtype=np.float32))
+    data["mesh_top"].x = torch.from_numpy(
+        _node_features("mesh_top", g.top_pos, g.top_is_vdd, g.top_is_pad)
+    )
+    data["mesh_bot"].x = torch.from_numpy(
+        _node_features(
+            "mesh_bot", g.bot_pos, g.bot_is_vdd, np.zeros(g.n_bot_nodes, dtype=np.int8)
+        )
     )
 
-    # ----- edge helpers -----
     def _const_attr(n: int, **kwargs) -> np.ndarray:
-        """6-dim edge attribute with named columns set, rest zero."""
         a = np.zeros((n, EDGE_ATTR_DIM), dtype=np.float32)
         for k, v in kwargs.items():
             a[:, EDGE_ATTR_COLS.index(k)] = v
         return a
 
     def _load_attr(loads: np.ndarray) -> np.ndarray:
-        """Per-edge attribute for the load relation; ``loads`` is
-        ``[n_loads, 4]`` = (I_peak, freq, duty, phase)."""
         a = np.zeros((loads.shape[0], EDGE_ATTR_DIM), dtype=np.float32)
         a[:, EDGE_ATTR_COLS.index("I_peak")] = loads[:, 0]
         a[:, EDGE_ATTR_COLS.index("freq")] = loads[:, 1]
@@ -376,24 +427,23 @@ def to_hetero_data(g: PDNGraph):
         a[:, EDGE_ATTR_COLS.index("phase")] = loads[:, 3]
         return a
 
-    def _bidir_same_type(edges: np.ndarray) -> np.ndarray:
-        u, v = edges[:, 0], edges[:, 1]
+    def _bidir(pairs: np.ndarray) -> np.ndarray:
+        u, v = pairs[:, 0], pairs[:, 1]
         return np.stack([np.concatenate([u, v]), np.concatenate([v, u])], axis=0)
 
-    # ----- strap edges (same-type bidir packed into a single edge_index) -----
-    ei_top = _bidir_same_type(g.top_edges).astype(np.int64)
+    # ----- strap edges (within-layer same-net, bidir packed) -----
+    ei_top = _bidir(g.top_edges).astype(np.int64) if g.top_edges.size else np.empty((2, 0), dtype=np.int64)
     data["mesh_top", "strap", "mesh_top"].edge_index = torch.from_numpy(ei_top)
     data["mesh_top", "strap", "mesh_top"].edge_attr = torch.from_numpy(
         _const_attr(ei_top.shape[1], R=g.R_top)
     )
-
-    ei_bot = _bidir_same_type(g.bot_edges).astype(np.int64)
+    ei_bot = _bidir(g.bot_edges).astype(np.int64) if g.bot_edges.size else np.empty((2, 0), dtype=np.int64)
     data["mesh_bot", "strap", "mesh_bot"].edge_index = torch.from_numpy(ei_bot)
     data["mesh_bot", "strap", "mesh_bot"].edge_attr = torch.from_numpy(
         _const_attr(ei_bot.shape[1], R=g.R_bot)
     )
 
-    # ----- via edges (cross-type bidir → two relations sharing the "via" name) -----
+    # ----- via edges (top ↔ bot, two directed relations sharing 'via') -----
     via_top = g.via_pairs[:, 0].astype(np.int64)
     via_bot = g.via_pairs[:, 1].astype(np.int64)
     via_attr = _const_attr(via_top.size, R=g.R_via)
@@ -402,27 +452,35 @@ def to_hetero_data(g: PDNGraph):
     data["mesh_bot", "via", "mesh_top"].edge_index = torch.from_numpy(np.stack([via_bot, via_top]))
     data["mesh_bot", "via", "mesh_top"].edge_attr = torch.from_numpy(via_attr.copy())
 
-    # ----- decap edges (cross-type bidir, "decap") -----
-    decap_src = g.decap_attach_bot_idx.astype(np.int64)
-    decap_dst = np.zeros_like(decap_src)
-    decap_attr = _const_attr(decap_src.size, C=g.C_decap)
-    data["mesh_bot", "decap", "gnd"].edge_index = torch.from_numpy(np.stack([decap_src, decap_dst]))
-    data["mesh_bot", "decap", "gnd"].edge_attr = torch.from_numpy(decap_attr.copy())
-    data["gnd", "decap", "mesh_bot"].edge_index = torch.from_numpy(np.stack([decap_dst, decap_src]))
-    data["gnd", "decap", "mesh_bot"].edge_attr = torch.from_numpy(decap_attr.copy())
-
-    # ----- load edges (cross-type bidir, "load"; per-edge attribute) -----
-    if g.n_loads > 0:
-        load_src = g.load_attach_bot_idx.astype(np.int64)
-        load_dst = np.zeros_like(load_src)
-        load_attr = _load_attr(g.loads.astype(np.float32))
+    # ----- decap edges (cross-net within M_bot, bidir packed) -----
+    if g.n_decaps > 0:
+        ei_dec = _bidir(g.decap_pairs).astype(np.int64)
+        dec_attr_one_dir = _const_attr(g.n_decaps, C=g.C_decap)
+        dec_attr = np.concatenate([dec_attr_one_dir, dec_attr_one_dir], axis=0)
     else:
-        load_src = np.empty(0, dtype=np.int64)
-        load_dst = np.empty(0, dtype=np.int64)
-        load_attr = np.empty((0, EDGE_ATTR_DIM), dtype=np.float32)
-    data["mesh_bot", "load", "gnd"].edge_index = torch.from_numpy(np.stack([load_src, load_dst]))
-    data["mesh_bot", "load", "gnd"].edge_attr = torch.from_numpy(load_attr.copy())
-    data["gnd", "load", "mesh_bot"].edge_index = torch.from_numpy(np.stack([load_dst, load_src]))
-    data["gnd", "load", "mesh_bot"].edge_attr = torch.from_numpy(load_attr.copy())
+        ei_dec = np.empty((2, 0), dtype=np.int64)
+        dec_attr = np.empty((0, EDGE_ATTR_DIM), dtype=np.float32)
+    data["mesh_bot", "decap", "mesh_bot"].edge_index = torch.from_numpy(ei_dec)
+    data["mesh_bot", "decap", "mesh_bot"].edge_attr = torch.from_numpy(dec_attr)
+
+    # ----- load edges (cross-net within M_bot, directed Vdd→Vss) -----
+    # Load relation is directed (not bidir-packed) so PyG auto-offsets
+    # the edge_index correctly under batching, and the regressor head
+    # can read ``edge_index[0]`` for Vdd-side endpoints and
+    # ``edge_index[1]`` for Vss-side endpoints. The load is physically a
+    # current source from Vdd to Vss, so a single-direction message —
+    # "Vdd-side has this current draw" → Vss-side — captures the load
+    # information; the GNN can propagate it further via the symmetric
+    # strap / decap relations.
+    if g.n_loads > 0:
+        load_src = g.load_pairs[:, 0].astype(np.int64)
+        load_dst = g.load_pairs[:, 1].astype(np.int64)
+        ei_ld = np.stack([load_src, load_dst])
+        ld_attr = _load_attr(g.loads.astype(np.float32))
+    else:
+        ei_ld = np.empty((2, 0), dtype=np.int64)
+        ld_attr = np.empty((0, EDGE_ATTR_DIM), dtype=np.float32)
+    data["mesh_bot", "load", "mesh_bot"].edge_index = torch.from_numpy(ei_ld)
+    data["mesh_bot", "load", "mesh_bot"].edge_attr = torch.from_numpy(ld_attr)
 
     return data
