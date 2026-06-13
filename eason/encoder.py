@@ -3,9 +3,10 @@
 * ``EncoderConfig`` — dataclass of the encoder knobs: hidden width,
   depth, node dropout, per-relation conv type, and DropEdge rate.
 * ``PDNEncoder`` — stacked ``HeteroConv`` layers with LayerNorm +
-  residual. Node features are uniform 6-dim ``[one_hot_type(2),
-  is_vdd, is_pad, x, y]``; edge features are uniform 7-dim
-  post-normalization. Optional **DropEdge** (drops a fraction of
+  residual. Node features are uniform 2-dim ``[is_vdd, is_pad]`` (layer
+  identity comes from the node type, connectivity from ``edge_index``);
+  edge features are uniform 7-dim post-normalization. Optional
+  **DropEdge** (drops a fraction of
   ``strap`` and ``decap`` edges per layer during training, never via /
   load — those are the supply path and the input signal respectively).
 * ``PDNDroopRegressor`` — encoder + per-load-edge scalar head. The head

@@ -1,0 +1,210 @@
+# Prediction Analysis — Where Correlation and Precision Differ
+
+*A detailed look at the droop surrogate's forward predictions: how good they
+are, and — more usefully — **where** they are good and where they degrade.
+All numbers are for the coordinate-free (2-dim node feature) 7-hop model
+unless stated. Figures live in [`figures/`](figures/).*
+
+Reproduce with:
+
+```bash
+python3.12 scripts/analyze_predictions.py   # metrics + figures
+```
+
+Numbers are dumped to [`analysis/prediction_metrics.json`](analysis/prediction_metrics.json).
+
+---
+
+## 0. TL;DR
+
+- **In-distribution (n_top 3 & 7): essentially exact.** R² > 0.99999, MAE
+  < 0.0002 mV. The model has effectively memorized the two training
+  topologies' droop physics.
+- **Out-of-distribution (held-out n_top = 4): correlation stays high, absolute
+  precision loosens.** Per-site R² = **0.827**, but Spearman rank = **0.918**,
+  and on the design-binding **worst-load** number R² = **0.944**, Spearman =
+  **0.987**.
+- **The single most important takeaway:** *correlation degrades far more
+  gracefully than precision*. The model keeps **ranking** designs correctly on
+  an unseen topology long after its absolute mV predictions start to drift.
+  For a design tool, ranking is what matters.
+- **Error is magnitude-driven and structured**, not random: it concentrates at
+  the deep-droop (thin-wire / low-cap) corner of the design space, and at
+  specific load sites that sit far from a supply pad in the unseen topology.
+
+---
+
+## 1. The two metrics, and why they diverge
+
+Every configuration scores ~1.0 on the training topologies, so the validation
+number is uninformative (the model interpolates a grid family it has seen
+thousands of times). The honest test is the **held-out pad count n_top = 4**.
+
+| split | topology | R² (per-site) | Spearman | MAE (mV) | rel-MAE |
+|---|---|---|---|---|---|
+| train | n_top 3 & 7 | 0.99999 | 1.000 | 0.0001 | 0.06% |
+| val | n_top 3 & 7 | 0.99999 | 1.000 | 0.0001 | 0.06% |
+| **test** | **n_top 4 (OOD)** | **0.827** | **0.918** | **0.030** | **15.6%** |
+
+The gap between train and test is the cost of generalizing to a topology never
+seen — not noise, not underfitting. Two things deserve emphasis:
+
+1. **R² (0.827) understates the model's usefulness.** R² is an *absolute*
+   squared-error metric; it punishes a small systematic mV offset heavily.
+   Spearman (0.918) measures whether the model gets the *ordering* right, and
+   it is much higher — the model rarely confuses a high-droop design for a
+   low-droop one, even on the unseen grid.
+
+2. **Per-site vs worst-load.** The design question is never "what is the droop
+   at site 7?" — it is "what is the *worst* droop anywhere on the chip?" When we
+   collapse the 14 per-site predictions to the per-sample maximum (the
+   spec-binding number), accuracy jumps sharply:
+
+| metric (OOD n_top = 4) | per-site (14/sample) | **worst-load (1/sample)** |
+|---|---|---|
+| R² | 0.827 | **0.944** |
+| Spearman | 0.918 | **0.987** |
+| MAE | 0.030 mV | **0.021 mV** |
+| rel-MAE | 15.6% | **7.8%** |
+
+The worst-load is the easiest thing to predict and the only thing the designer
+cares about. **The model is materially better at its actual job than the raw
+per-site R² suggests.**
+
+![Predicted vs true droop](figures/fig_pred_vs_true.png)
+
+*In-distribution (left, middle): points collapse onto y = x. OOD (right): the
+cloud fans out but stays tightly correlated and monotonic — high-droop designs
+are still predicted high.*
+
+---
+
+## 2. Where precision differs #1 — droop magnitude
+
+Error is **not uniform across the dynamic range**. Splitting the OOD test set
+into log-spaced bins of true droop:
+
+![Error vs magnitude](figures/fig_error_vs_magnitude.png)
+
+- **Absolute error grows with droop** (left). Deep-droop sites (thin wire, low
+  cap, far from a pad) carry the largest mV error — mean |error| rises from
+  ~0.014 mV at the shallow end to ~0.05 mV at the deep end. This is expected:
+  bigger signals leave room for bigger absolute misses, and the deep-droop
+  regime is where the physics is most sensitive to topology.
+- **Relative error is worst at the shallow tail** (right): ~15% median at the
+  smallest droops, falling to ~6% at the largest. Tiny droops are dominated by
+  long-range IR contributions that depend most on the exact pad layout — the
+  thing that changed between train and test.
+
+For design this is the **favorable** combination: the model is *relatively*
+most accurate exactly where droop is large, i.e. near the spec boundary where
+decisions are made. The sloppy regime (shallow droop) is the regime the
+designer can ignore.
+
+---
+
+## 3. Where precision differs #2 — the design space
+
+Binning the OOD error over the two continuous knobs (`wire_width`, `C_decap`):
+
+![Design-space error map](figures/fig_designspace_error.png)
+
+- Absolute error (left) is sharply concentrated in the **thin-wire / low-cap
+  corner** — the high-droop, hardest-to-cool regime. The fat-wire / high-cap
+  region (low droop) is predicted almost perfectly.
+- Relative error (right) is flatter but still peaks along the bottom edge
+  (lowest cap), where transient droop is most sensitive to the decap that
+  isn't there.
+
+**Design implication:** the surrogate is most trustworthy in the
+*comfortable* part of the design space and least precise in the *aggressive*
+corner. A designer optimizing toward minimum copper is pushed toward exactly
+that corner — which is why we **validate every recovered design against the
+real simulator** (see [GENERATION_ANALYSIS.md](GENERATION_ANALYSIS.md)).
+
+---
+
+## 4. Where precision differs #3 — load-site geometry
+
+The 14 load sites are not equally hard:
+
+![Per-site breakdown](figures/fig_per_site.png)
+
+- A handful of sites (≈ 1, 9, 13) carry 3–5× the MAE of the easiest sites.
+- Part of this tracks droop depth (right panel — deeper-droop sites tend to be
+  harder), but **not entirely**: site 1 is shallow yet high-error. The residual
+  pattern is *structural* — these are the bot-mesh positions that sit furthest
+  from a supply via in the n_top = 4 tap pattern specifically. The model never
+  saw that pad spacing, so the sites whose droop depends most on it are the
+  ones it extrapolates worst.
+
+This is the cleanest evidence that the OOD error is a **topology-coverage**
+problem, not a model-capacity problem: the error has spatial structure tied to
+the unseen pad layout, exactly where you'd predict.
+
+---
+
+## 5. Residual structure — is the error safe?
+
+![Residuals](figures/fig_residual.png)
+
+- **Small negative bias** in log space (−0.031 ≈ −7% in droop): the model very
+  slightly *under-predicts* on average. Under-prediction is the dangerous
+  direction (it says a grid is safer than it is) — but this average is
+  dominated by the shallow, non-binding sites.
+- **The residual-vs-magnitude panel (right) shows banding**, not a formless
+  cloud: each band is one load site's systematic offset (consistent with §4).
+  The worrying streak — sites under-predicted by up to ~0.4 in log10 — lives at
+  **small true droop** (≈ 0.05–0.15 mV), i.e. *non-binding* sites. The
+  worst-load site (the one that sets the spec) is, by contrast, slightly
+  **over**-predicted (conservative) — confirmed independently by the inverse
+  design runs, where on the OOD topology the surrogate's worst-load prediction
+  is consistently above the simulator's.
+
+So the error is structured and, at the point that matters (the worst load), it
+errs in the **safe** direction.
+
+---
+
+## 6. Cost of dropping coordinates
+
+We removed absolute `(x, y)` node coordinates and the redundant layer one-hot
+(layer identity is already the PyG node type), shrinking node features from
+6-dim to 2-dim `[is_vdd, is_pad]`. Same architecture, same data, both 7 hops:
+
+![Coordinate-free vs coordinate-using](figures/fig_coord_vs_nocoord.png)
+
+| metric (OOD n_top = 4) | with coords (6-dim) | coord-free (2-dim) | Δ |
+|---|---|---|---|
+| per-site R² | 0.863 | 0.827 | −0.036 |
+| per-site MAE | 0.027 mV | 0.030 mV | +0.003 |
+| worst-load R² | 0.984 | 0.944 | −0.040 |
+| worst-load MAE | 0.012 mV | 0.021 mV | +0.009 |
+| worst-load Spearman | 0.998 | 0.987 | −0.011 |
+
+**Reading.** Coordinates buy a small but real accuracy gain (~0.04 R²). The
+reason is intuitive: within a *fixed grid family*, absolute position correlates
+with distance-from-pad, which is genuinely predictive of droop. The cost is
+that this signal **would not transfer** to a different floorplan — it is the
+kind of shortcut that inflates in-family scores and collapses across families.
+
+Trading ~0.04 R² for a model that learns purely from **topology (edges),
+rail/boundary flags, and component values** — with no coordinate leakage — is
+the right call for a tool meant to generalize across layouts. The coord-free
+model still ranks designs near-perfectly (worst-load Spearman 0.987). Single
+seed each, so part of the 0.04 gap is run-to-run noise; a multi-seed sweep
+would tighten the estimate.
+
+---
+
+## 7. Bottom line for prediction
+
+- The model is **near-exact in-distribution** and **degrades gracefully OOD**,
+  with correlation/ranking holding up far better than absolute mV precision.
+- Error is **structured and interpretable**: largest (absolute) at deep droop,
+  largest (relative) at the shallow tail, concentrated at the aggressive
+  design-space corner and at sites far from the unseen topology's pads.
+- At the **worst-load** number that actually sets the spec, the model is
+  strong (R² 0.944, Spearman 0.987) and **conservative** in its errors.
+- Dropping coordinates costs ~0.04 R² but removes a non-transferable shortcut —
+  a deliberate, defensible trade for cross-layout generalization.

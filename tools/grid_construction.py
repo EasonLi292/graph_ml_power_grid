@@ -357,11 +357,13 @@ def build_regular_pdn(
 EDGE_ATTR_DIM = 6
 EDGE_ATTR_COLS = ("R", "C", "I_peak", "freq", "duty", "phase")
 
-# Node feature layout: [one_hot_type(2), is_vdd, is_pad, x, y]. The
-# one-hot type signal survives the input projection so the encoder can
-# always tell which layer a node is on; ``is_vdd`` carries the net.
-NODE_FEATURE_DIM = 6
-NODE_TYPE_IDX = {"mesh_top": 0, "mesh_bot": 1}
+# Node feature layout: [is_vdd, is_pad]. Layer identity is already encoded
+# by the heterogeneous node type (mesh_top vs mesh_bot), and physical
+# adjacency / segment scale are carried by edge_index and the per-segment
+# resistances — so coordinates and a layer one-hot would be redundant
+# inputs the model could overfit to. We expose only the rail (``is_vdd``)
+# and the boundary-condition marker (``is_pad``).
+NODE_FEATURE_DIM = 2
 
 
 def to_hetero_data(g: PDNGraph):
@@ -392,25 +394,21 @@ def to_hetero_data(g: PDNGraph):
 
     data = HeteroData()
 
-    def _node_features(node_type: str, pos: np.ndarray, is_vdd: np.ndarray, is_pad: np.ndarray) -> np.ndarray:
-        n = pos.shape[0]
-        one_hot = np.zeros((n, 2), dtype=np.float32)
-        one_hot[:, NODE_TYPE_IDX[node_type]] = 1.0
-        feat = np.column_stack([
-            one_hot,
+    def _node_features(is_vdd: np.ndarray, is_pad: np.ndarray) -> np.ndarray:
+        # [is_vdd, is_pad]. Layer identity comes from the node type, and
+        # connectivity / scale from edge_index + resistances, so neither
+        # coordinates nor a layer one-hot are exposed to the GNN.
+        return np.column_stack([
             is_vdd.astype(np.float32),
             is_pad.astype(np.float32),
-            pos.astype(np.float32),
         ])
-        return feat
 
     data["mesh_top"].x = torch.from_numpy(
-        _node_features("mesh_top", g.top_pos, g.top_is_vdd, g.top_is_pad)
+        _node_features(g.top_is_vdd, g.top_is_pad)
     )
+    # mesh_bot has no pads, so its ``is_pad`` column is all zeros.
     data["mesh_bot"].x = torch.from_numpy(
-        _node_features(
-            "mesh_bot", g.bot_pos, g.bot_is_vdd, np.zeros(g.n_bot_nodes, dtype=np.int8)
-        )
+        _node_features(g.bot_is_vdd, np.zeros(g.n_bot_nodes, dtype=np.int8))
     )
 
     def _const_attr(n: int, **kwargs) -> np.ndarray:

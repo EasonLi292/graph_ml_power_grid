@@ -26,9 +26,14 @@ need?"
 The PDN is a two-layer mesh, represented as a heterogeneous graph:
 
 - **Nodes** — every wire intersection. Two node types: `mesh_top` (top metal
-  layer) and `mesh_bot` (bottom layer). Whether a node is on the Vdd or Vss
-  net is a *feature flag*, not a separate type. Each node carries **6 features**
-  (position, net flag, etc.).
+  layer) and `mesh_bot` (bottom layer). Each node carries just **2 features**:
+  `[is_vdd, is_pad]` — which supply rail it's on, and whether it's a bump/pad
+  (a boundary condition). Nothing else: layer identity is already the node
+  *type*, physical adjacency is already the `edge_index`, and segment scale is
+  already baked into the edge resistances. Crucially, **no coordinates** — the
+  model is forbidden from learning absolute position, which wouldn't transfer
+  to a new floorplan. (See §6 and `PREDICTION_ANALYSIS.md` for the measured
+  cost of this choice.)
 - **Edges** — four physical relations, each with attributes
   `[R, C, I_peak, freq, duty, phase]`:
 
@@ -146,8 +151,15 @@ pads and the model is structurally blind. Sweeping the number of layers
 | **7** | **0.863** |
 
 The jump from 3→5 is enormous (+0.61); 5→7 adds +0.06; beyond that it flattens.
-**7 hops is the chosen default.** Test error at 7 hops: MAE ≈ 0.027 mV, ~14%
-relative error.
+**7 hops is the chosen default.** (These numbers are from the
+coordinate-using model; the coordinate-free model used everywhere else in this
+report scores 0.827 at 7 hops — see §6.)
+
+> **Per-site vs worst-load.** The 0.827/0.863 figures are *per-load-site* R².
+> The number a designer acts on is the **worst** droop on the chip, and the
+> model is much better at that: worst-load R² = **0.944** (coord-free) / 0.984
+> (coords), Spearman = 0.987 / 0.998. Deep dive in
+> [PREDICTION_ANALYSIS.md](PREDICTION_ANALYSIS.md).
 
 ### 4.2 The conductance gate was a hidden hero
 
@@ -192,69 +204,101 @@ The payoff. Given a **droop budget** (e.g. ≤ 0.15 mV) and a **topology**
 4. Backprop through *surrogate → graph builder → decoder*, Adam-step `z`.
 5. **Validate the recovered design against the real simulator.**
 
-### 5.1 Results (sim = real-simulator ground truth at the recovered design)
+### 5.1 Results (coordinate-free surrogate; sim = simulator at the recovered design)
 
 | budget | n_top | wire_width | C_decap | pred | **sim** | meets spec |
 |---|---|---|---|---|---|---|
 | 0.10 mV | 3 | 0.986 | 7.2e-10 | 0.113 | 0.113 | ✗ infeasible |
-| | 4 | 0.985 | 7.1e-10 | 0.111 | 0.101 | ✗ infeasible |
-| | 7 | 0.833 | 2.3e-10 | 0.099 | 0.099 | ✓ |
-| 0.15 mV | 3 | 0.908 | 4.2e-10 | 0.135 | 0.135 | ✓ |
-| | 4 | 0.905 | 4.1e-10 | 0.133 | 0.123 | ✓ |
-| | 7 | 0.601 | 5.1e-11 | 0.150 | 0.150 | ~boundary |
-| 0.20 mV | 3 | 0.617 | 2.4e-10 | 0.200 | 0.200 | ✓ |
-| | 4 | 0.580 | 2.5e-10 | 0.200 | 0.188 | ✓ |
-| | 7 | 0.454 | 5.1e-11 | 0.195 | 0.195 | ✓ |
+| | 4 (OOD) | 0.736 | 7.7e-10 | 0.141 | 0.122 | ✗ infeasible |
+| | 7 | 0.831 | 2.3e-10 | 0.099 | 0.099 | ✓ |
+| 0.15 mV | 3 | 0.909 | 4.2e-10 | 0.134 | 0.134 | ✓ |
+| | 4 (OOD) | 0.713 | 5.6e-10 | 0.150 | 0.132 | ✓ |
+| | 7 | 0.601 | 5.1e-11 | 0.150 | 0.150 | ✗ (boundary) |
+| 0.20 mV | 3 | 0.613 | 2.5e-10 | 0.200 | 0.200 | ✓ |
+| | 4 (OOD) | 0.631 | 2.4e-10 | 0.196 | 0.183 | ✓ |
+| | 7 | 0.448 | 5.1e-11 | 0.197 | 0.197 | ✓ |
 
-### 5.2 The story — four physically correct signals
+*Full deep dive — figures, the conservative-OOD "safe error" story, and the one
+local-minimum case — in [GENERATION_ANALYSIS.md](GENERATION_ANALYSIS.md).*
 
-1. **The surrogate is trustworthy exactly where it's used.** Predicted droop ≈
-   simulated droop almost everywhere (0.135/0.135, 0.200/0.200). The optimizer
-   isn't exploiting a model blind spot. *This validates the model for design far
-   better than the aggregate R².*
+### 5.2 The story — five physically correct signals
+
+1. **The surrogate is trustworthy exactly where it's used.** In-distribution,
+   predicted droop ≈ simulated droop dead on (0.134/0.134, 0.200/0.200). The
+   optimizer isn't exploiting a model blind spot. *This validates the model for
+   design far better than the aggregate R².*
 2. **Looser budget → less copper, every time.** As the budget relaxes
    0.10→0.15→0.20, recovered wire width shrinks monotonically (n_top=3:
-   0.99→0.91→0.62). Correct cost/performance tradeoff.
+   0.99→0.91→0.61). Correct cost/performance tradeoff.
 3. **Harder topology → more copper.** At a fixed budget, fewer pads need fatter
-   wire (0.20 mV: n_top 3→0.62, 4→0.58, 7→0.45). Fewer supply points means each
-   carries more current — textbook PDN physics, learned, not told.
+   wire (n_top 7 always uses the least). Fewer supply points means each carries
+   more current — textbook PDN physics, learned, not told.
 4. **It lands on the spec boundary, not over-built.** Simulated droop sits right
    at the budget — the *cheapest* design that meets spec, which is the point.
-5. **It reports honest infeasibility.** At 0.10 mV with only 3–4 pads, the
-   optimizer drives wire width to the ceiling (~0.985) and still can't meet
-   spec — and says so (✗) rather than inventing a design. That's correct: the
-   budget is unachievable for sparse grids within the knob ranges.
+5. **It reports honest infeasibility.** At 0.10 mV with only 3 pads, the
+   optimizer drives wire width to the ceiling (~0.986) and still can't meet
+   spec — and says so (✗) rather than inventing a design.
 
-Notably, on the **unseen topology (n_top = 4)** the surrogate is slightly
-*conservative* (predicts a touch high: 0.133 vs sim 0.123) — a safe direction
-to err for a design tool.
+On the **unseen topology (n_top = 4)** the surrogate is consistently
+*conservative* — it predicts higher droop than the simulator measures (0.141 vs
+0.122; 0.150 vs 0.132; 0.196 vs 0.183). Erring high is the **safe** direction
+for a design tool: anything it certifies as feasible is feasible with margin.
 
 ---
 
-## 6. Limitations & honest caveats
+## 6. The coordinate-free representation (and what it costs)
+
+We deliberately strip node features down to `[is_vdd, is_pad]` — no
+coordinates, no layer one-hot. Layer identity is the node *type*, adjacency is
+the `edge_index`, and segment scale is in the resistances, so those signals
+would be redundant; coordinates specifically are a *non-transferable* shortcut
+(within one grid family, position ≈ distance-from-pad, which a model can
+memorize but can't carry to a new floorplan). Measured head-to-head at 7 hops:
+
+| metric (OOD n_top = 4) | with coords (6-dim) | coord-free (2-dim) |
+|---|---|---|
+| per-site R² | 0.863 | **0.827** |
+| worst-load R² | 0.984 | **0.944** |
+| worst-load Spearman | 0.998 | **0.987** |
+
+Coordinates buy ~0.04 R², for the intuitive reason above — but the coord-free
+model still ranks designs near-perfectly (worst-load Spearman 0.987) and learns
+only from transferable structure. We take that trade. Full breakdown of *where*
+the error lives (magnitude, design-space corner, per-site geometry) in
+[PREDICTION_ANALYSIS.md](PREDICTION_ANALYSIS.md).
+
+---
+
+## 7. Limitations & honest caveats
 
 - **Narrow topology diversity.** The model has seen only two pad counts (3, 7)
-  on one grid family. 0.863 on the interpolated n_top = 4 is strong, but says
+  on one grid family. 0.827 on the interpolated n_top = 4 is strong, but says
   little about a *genuinely* different topology. The next real improvement is
   more topology variety in training — a data question, not an architecture one.
-- **Boundary cases.** A couple of designs land marginally over budget because
-  the loss is zero only *at* the boundary. A small feasibility margin
-  (optimize against `budget·(1−ε)`) fixes this.
 - **Aggregate R² is the wrong scoreboard for design.** What matters downstream
-  is fidelity *where the optimizer lands* (Section 5.1) and correct ranking of
-  designs — both of which look good.
+  is fidelity *where the optimizer lands* (§5.1) and correct *ranking* of
+  designs (Spearman, not R²) — both of which look good.
+- **OOD optimization robustness.** The inverse-design optimizer can settle in a
+  local minimum on the unseen topology (one of nine cases). The fix is
+  multi-start `z` and a feasibility margin (`budget·(1−ε)`), not a better model.
 
 ---
 
-## 7. Bottom line
+## 8. Bottom line
 
-- **Model:** a heterogeneous GNN with a physics-shaped **conductance gate** and
-  **7 message-passing hops**, predicting per-block droop. Test R² = **0.863** on
-  a pad count it never trained on.
-- **The two wins that matter:** the conductance gate (intuitive, prevents
-  memorization) and enough depth to span the grid. DropEdge and the other tricks
-  were either confounded by depth or actively unhelpful.
+- **Model:** a heterogeneous GNN with a physics-shaped **conductance gate**,
+  **7 message-passing hops**, and a **coordinate-free** node representation,
+  predicting per-block droop. Test (OOD) per-site R² = **0.827**; worst-load R²
+  = **0.944**, Spearman = **0.987** — on a pad count it never trained on.
+- **The wins that matter:** the conductance gate (intuitive, prevents
+  memorization), enough depth to span the grid, and a representation that learns
+  only transferable structure. DropEdge and the other tricks were either
+  confounded by depth or actively unhelpful.
 - **Inverse design works and tells a coherent physical story:** it recovers
   sensible width/decap, trades cost against the droop budget correctly, scales
   copper with topology difficulty, and flags infeasible specs — with surrogate
-  predictions that the real simulator confirms.
+  predictions that the real simulator confirms (and that err *conservatively* on
+  unseen topologies).
+- **Deeper dives:** [PREDICTION_ANALYSIS.md](PREDICTION_ANALYSIS.md) (forward
+  accuracy, where it differs) and [GENERATION_ANALYSIS.md](GENERATION_ANALYSIS.md)
+  (inverse design).
