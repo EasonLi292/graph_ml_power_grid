@@ -196,11 +196,12 @@ The model already generalizes well; the regularizer just removes signal.
 The payoff. Given a **droop budget** (e.g. ≤ 0.15 mV) and a **topology**
 (`n_top`), we freeze the surrogate and optimize the design backward:
 
-1. Decode an unconstrained latent `z` into a valid `(wire_width, C_decap)`.
+1. Take the two design knobs `(wire_width, C_decap)` directly, each
+   sigmoid-reparameterized so it always stays in its valid range.
 2. Build the grid graph differentiably and predict worst-case droop.
 3. Loss = `ReLU(droop − budget)²  +  λ · cost(width, decap)` — meet the spec,
    then minimize metal.
-4. Backprop through *surrogate → graph builder → decoder*, Adam-step `z`.
+4. Backprop through *surrogate → graph builder* and gradient-step the two knobs.
 5. **Validate the recovered design against the real simulator.**
 
 ### 5.1 Results (coordinate-free surrogate; sim = simulator at the recovered design)

@@ -1,32 +1,29 @@
 """Gradient-based inverse design via the trained surrogate.
 
-The classic ML-for-design loop:
+We optimize the two design knobs ``(wire_width, C_decap)`` directly by gradient
+descent through the frozen surrogate:
 
-    1. Initialise a *latent* ``z`` (unconstrained ℝ²).
-    2. Decode z → physical parameters in the valid box::
+    1. Hold the knobs as unconstrained reals ``z`` and map each through a
+       sigmoid so they always land in their valid ranges::
 
            wire_width = sigmoid(z₀) · (ww_hi − ww_lo) + ww_lo
            C_decap    = 10^( sigmoid(z₁) · (log10 cd_hi − log10 cd_lo) + log10 cd_lo )
 
-       (so any z gives a valid design — no projection step inside the loop.)
-    3. Build the PDN graph from these continuous parameters with **autograd
+       (a plain reparameterization — any ``z`` gives a valid design, so there
+       is no projection step inside the loop.)
+    2. Build the PDN graph from these continuous parameters with **autograd
        enabled on the edge attributes**, push it through the frozen
        surrogate, and read the predicted worst-load droop.
-    4. Loss is *hinge spec + cost*::
+    3. Loss is *hinge spec + cost*::
 
            L = ReLU(droop − target)²  +  λ · cost(wire_width, C_decap)
 
        — when the design is infeasible, the spec term dominates and drives
        droop down; once feasible, the cost term pulls toward the cheapest
        point on the spec boundary.
-    5. Backprop through (surrogate → graph builder → decoder) and Adam-step ``z``.
-    6. After N steps, report the recovered physical design and validate
+    4. Backprop through (surrogate → graph builder) and Adam-step the knobs.
+    5. After N steps, report the recovered physical design and validate
        against the simulator.
-
-The "decode" step is the bridge to a VAE-style generator: replace the
-hand-coded sigmoid with a learned ``decoder_mlp(z)`` and you get the
-same loop with arbitrarily high-dimensional latent + learned design
-distribution.
 
 Usage:
     python scripts/design_grad.py \\
@@ -76,11 +73,11 @@ P_COL = EDGE_ATTR_COLS.index("phase")
 
 
 # -----------------------------------------------------------------------------
-# Decoder: ℝ² → physical (wire_width, C_decap)
+# Sigmoid reparameterization: unconstrained ℝ² → physical (wire_width, C_decap)
 # -----------------------------------------------------------------------------
 
-def decode(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sigmoid-mapped decoder. ``z`` is shape [2]."""
+def to_physical(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map unconstrained ``z`` (shape [2]) into the valid knob ranges."""
     ww_p = GLOBAL_RANGES.by_name("wire_width")
     cd_p = GLOBAL_RANGES.by_name("C_decap")
     sig = torch.sigmoid(z)
@@ -184,7 +181,7 @@ def design_loss(
     target_v: float,
     lambda_cost: float,
 ) -> tuple[torch.Tensor, dict]:
-    wire_width, C_decap = decode(z)
+    wire_width, C_decap = to_physical(z)
     batch = build_diff_data(n_top, wire_width, C_decap)
     pred_log = model(batch)                            # [n_loads_in_batch]
     pred_v = 10.0 ** pred_log
@@ -295,7 +292,7 @@ def main() -> None:
 
     print()
     print("Notes:")
-    print("  * 'opt' = gradient-optimised design point in the latent space.")
+    print("  * 'opt' = gradient-optimised design point (the two knobs).")
     print("  * 'pred drp' = surrogate prediction at the recovered design;")
     print("    'sim drp' = simulator ground truth.")
     print("  * '✓' means the simulator confirms the spec; '✗' means the")

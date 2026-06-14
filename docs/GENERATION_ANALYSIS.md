@@ -43,26 +43,25 @@ python3.12 scripts/plot_generation.py   # figures from the captured table
 ## 1. The method in brief
 
 ```
- latent z ∈ ℝ²
-     │  sigmoid decode (keeps every z inside the valid box)
-     ▼
- (wire_width, C_decap)
+ (wire_width, C_decap)   ← the two free design knobs, optimized directly
      │  differentiable graph build  →  frozen surrogate
      ▼
  predicted worst-load droop
      │
  loss = ReLU(droop/budget − 1)²   +   λ · cost(width, decap)
         └─ meet the spec ─┘            └─ then minimize metal ─┘
-     │  backprop through surrogate → builder → decoder, Adam-step z
+     │  backprop through surrogate → builder, gradient-step the two knobs
      ▼
  recovered design  →  VALIDATE against the transient simulator
 ```
 
-The hinge loss is zero as soon as the design is feasible, so the cost term
-then pulls the solution down to the **cheapest point on the spec boundary**.
-Because the decoder is a plain sigmoid, this is exactly a VAE-style generator
-with the learned decoder replaced by a fixed one — the loop generalizes
-directly to a learned latent design distribution.
+We optimize the two design knobs directly by gradient descent through the
+frozen surrogate. Each knob is passed through a sigmoid so any unconstrained
+value lands in its valid range (`wire_width ∈ [0.2, 1.0]`, `C_decap ∈
+[5e-11, 8e-10]` in log space) — a simple reparameterization that removes the
+need for a projection step inside the loop. The hinge loss is zero as soon as
+the design is feasible, so the cost term then pulls the solution down to the
+**cheapest point on the spec boundary**.
 
 ---
 
