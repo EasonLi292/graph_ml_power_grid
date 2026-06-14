@@ -18,25 +18,24 @@ This project reuses the encoder/decoder VAE skeleton from [Z-GED](https://github
 
 ## Graph representation
 
-A PDN is encoded as a heterogeneous graph with three node types and five logical bidirectional edge relations. **All electrical elements live on edges** — including the load, which is a two-terminal current source between a `mesh_bot` node and `gnd`. Voltages are predicted per `mesh_bot` node.
+A PDN is encoded as a heterogeneous graph with **two node types** and four logical edge relations. **All electrical elements live on edges** — including the load, which is a current source between the Vdd-side and Vss-side `mesh_bot` nodes of a cell. The design is **two-rail**: Vdd and Vss are both ordinary mesh nodes (distinguished by a feature flag), so there is no separate ground node. Droop is predicted **per load edge** — one value for every load cell.
 
-**Node types** — uniform 6-dim feature `[one_hot_type(3), payload(3)]`. The type one-hot is part of the feature itself (not just an implicit signal carried by per-type weights), so message passing can't forget what kind of node it's looking at.
+**Node features** — each node carries just **2 features** `[is_vdd, is_pad]`: which supply rail it sits on, and whether it is a supply bump (a Dirichlet `V = Vdd`/`0` boundary in the solver). Nothing else — **no coordinates and no layer one-hot**. Layer identity is already the PyG node *type*, physical adjacency is the `edge_index`, and per-segment scale is carried by the edge resistances, so exposing absolute position would only be a non-transferable shortcut the model could overfit.
 
-- `mesh_top` — junction on the coarse top metal layer. Payload `(x, y, is_pad)`; `is_pad=1` carries a Dirichlet condition `V = Vdd` in the solver.
-- `mesh_bot` — junction on the fine bottom metal layer. Payload `(x, y, 0)`.
-- `gnd` — single ideal-zero reference node. Payload `(0, 0, 0)`.
+- `mesh_top` — junction on the coarse top metal layer; `is_pad=1` on the row-0 bumps.
+- `mesh_bot` — junction on the fine bottom metal layer; `is_pad=0` (bumps live on M_top).
 
-**Edge relations**, all bidirectional, all carrying the same 6-dim attribute `[R, C, I_peak, freq, duty, phase]` (zero in columns not relevant to that element type):
+**Edge relations**, all carrying the same 6-dim attribute `[R, C, I_peak, freq, duty, phase]` (zero in columns not relevant to that element type):
 
 - `mesh_top ↔ mesh_top` strap — `R` = derived top-segment resistance.
 - `mesh_bot ↔ mesh_bot` strap — `R` = derived bot-segment resistance.
 - `mesh_top ↔ mesh_bot` via — `R` = `R_via`.
-- `mesh_bot ↔ gnd` decap — `C` = `C_decap`.
-- `mesh_bot ↔ gnd` load — `(I_peak, freq, duty, phase)` columns; per-edge values. **The load is a current source, not a resistor** — its current is dictated by switching activity, not by Ohm's law, so an `R_load = V/I` model would create a spurious voltage-current feedback under droop.
+- `mesh_bot ↔ mesh_bot` decap — `C` = `C_decap`, between a Vdd node and the adjacent Vss node.
+- `mesh_bot ↔ mesh_bot` load — `(I_peak, freq, duty, phase)` on the same Vdd↔Vss pair; per-edge values. **The load is a current source, not a resistor** — its current is dictated by switching activity, not by Ohm's law, so an `R_load = V/I` model would create a spurious voltage-current feedback under droop.
 
-Same-type bidirectionality (e.g. `mesh_top ↔ mesh_top`) is one PyG relation with both directions packed into `edge_index`. Cross-type bidirectionality (e.g. via, decap, load) is expressed as two PyG relations sharing the same relation name. In the normalizer, the raw 6-dim edge attribute is mapped to 7-dim by replacing `phase` with `(sin 2πφ, cos 2πφ)` for circular continuity on load edges.
+Same-layer strap edges pack both directions into one `edge_index`; via is two directed PyG relations sharing the `via` name; decap and load are bidir-packed `mesh_bot ↔ mesh_bot` relations (the head reads `load` as directed Vdd→Vss). In the normalizer, the raw 6-dim edge attribute is mapped to 7-dim by replacing `phase` with `(sin 2πφ, cos 2πφ)` for circular continuity on load edges.
 
-**Canonical regular instance** ([tools/grid_construction.py](tools/grid_construction.py), `build_regular_pdn`): `n_top × n_top` M_top stacked on 7×7 M_bot, vias at every M_top node aligned to the corresponding bot positions. Four supply-pad patterns are supported by the builder (`corner` / `checker` / `edge_strip` / `distributed`), but **this dataset pins `pad_pattern="corner"`** so the four pad-via bot positions are independent of `n_top` and the surviving load set stays at a constant 12 cells across every sample. Loads sit on the even M_bot sub-grid *minus* nodes directly under a Vdd-pad via; 9 decap sites sit on the odd sub-grid. Per-segment `R_top`, `R_bot` are derived from sheet resistance × pitch / wire width: `R_seg = Rsheet × (pitch / wire_width)`. Every load draws the same `(I_peak, freq, duty, phase)` waveform — see "Dataset" below for the design rationale.
+**Canonical regular instance** ([tools/grid_construction.py](tools/grid_construction.py), `build_regular_pdn`): an `n_top × n_top` M_top stacked on a 7×7 M_bot, with vias at the step mapping so every via is same-net by construction. The bottom mesh uses a fixed column net pattern (`V V G G V V V`); straps run vertically per column plus same-net horizontal rungs. Loads and decaps sit on the Vdd↔Vss column boundaries at every row — **14 load cells and 14 decap sites, constant across `n_top ∈ {3, 4, 7}`**. Supply bumps are the row-0 M_top nodes (one per column). Per-segment `R_top`, `R_bot` are derived from sheet resistance × pitch / wire width: `R_seg = Rsheet × (pitch / wire_width)`. Every load draws the same `(I_peak, freq, duty, phase)` waveform — see "Dataset" below for the design rationale.
 
 Ground truth: backward-Euler MNA transient simulation in [tools/transient_solver.py](tools/transient_solver.py). Smoke test: `python scripts/smoke_test.py` builds the canonical instance, runs a 5 ns / 10 ps transient, and prints peak droop per M_bot node.
 
@@ -50,19 +49,19 @@ Ground truth: backward-Euler MNA transient simulation in [tools/transient_solver
 |--------------|----------------------------|------------------|---------|
 | `wire_width` | 0.2 – 1.0                  | log-uniform      | strap width (× `pitch_bot`) |
 | `C_decap`    | 50 pF – 800 pF             | log-uniform      | per-decap-site capacitance (single MIM macro) |
-| `n_top`      | `{3, 4}` train; `{7}` OOD  | uniform discrete | M_top track density (= via-stub density to M_bot) |
+| `n_top`      | `{3, 7}` train; `{4}` OOD  | uniform discrete | M_top track density (= via-stub density to M_bot) |
 
-`wire_width` and `C_decap` are LHS-sampled jointly; `n_top` is uniform discrete and bucketed for the topology-OOD split (model trains on `{3, 4}`, evaluates extrapolation on `{7}`).
+`wire_width` and `C_decap` are sampled jointly; `n_top` is uniform discrete and bucketed for the topology-OOD split (model trains on `{3, 7}`, evaluates interpolation to the held-out `{4}`).
 
 ### Fixed constants (every sample)
 
 | topology        | value     | electrical / workload | value         |
 |-----------------|-----------|-----------------------|---------------|
 | `n_bot`         | 7         | `Rsheet_top`          | ≈ 0.0316 Ω/sq |
-| `pad_pattern`   | `corner`  | `Rsheet_bot`          | ≈ 0.158 Ω/sq  |
-| `n_loads`       | 12        | `R_via`               | ≈ 0.0632 Ω    |
-| `n_decaps`      | 9         | `freq`                | ≈ 0.894 GHz   |
-|                 |           | `I_peak`              | ≈ 4.47 mA (broadcast to every load) |
+| `bot_col_pattern` | `V V G G V V V` | `Rsheet_bot`    | ≈ 0.158 Ω/sq  |
+| `n_loads`       | 14        | `R_via`               | ≈ 0.0632 Ω    |
+| `n_decaps`      | 14        | `freq`                | ≈ 0.894 GHz   |
+|                 |           | `I_peak`              | ≈ 0.1 mA (broadcast to every load) |
 |                 |           | `duty`                | 0.4 |
 |                 |           | `phase`               | 0.0 (all loads in-phase — worst case) |
 
@@ -106,9 +105,9 @@ python scripts/inspect_dataset.py datasets/regular_v4/dataset.h5
 [tools/encoder.py](tools/encoder.py) implements the heterogeneous GNN encoder and a droop-regression head:
 
 - `InputNormalizer` — log10 + z-score for log-scale columns (R, C, I_peak, freq), plain z-score for linear columns; statistics derived analytically from the parameter ranges so no fit-on-data is needed. Columns that are constant across the dataset (`I_peak`, `freq`, `duty`, `phase`, `R_via`, `Rsheet_*`) register with a bounded-sigma stat so they normalize to a stable zero — the GNN still sees them but they carry no per-sample signal. Edge attributes are the uniform 6-dim `[R, C, I_peak, freq, duty, phase]`; the normalizer outputs a 7-dim vector with `phase` replaced by `(sin 2πφ, cos 2πφ)`.
-- `EdgeAwareConv` — generic message passing with `msg = MLP([x_i || x_j || edge_attr])`, sum aggregation, `update = MLP([x_i || agg])`. One instance per edge relation, wrapped in `HeteroConv` and stacked 3 deep with LayerNorm + residual.
-- `PDNEncoder` — emits per-node hidden representations across the three node types (`mesh_top`, `mesh_bot`, `gnd`).
-- `PDNDroopRegressor` — encoder + 2-layer MLP head over `mesh_bot` nodes; predicts log10(droop) by default. ~180k parameters at `hidden_dim=32` and 3 layers (~600k at the heavier `hidden_dim=64`).
+- `AdmittanceConv` (default, `conv_type="admittance"`) — physics-shaped message passing. Resistor edges (`strap`, `via`) use a **conductance gate** `gate = exp(−α·z(log10 R))` with one learnable scalar `α` per layer (≈ Ohm's `1/R` weighting, no MLP that could memorize R as a fingerprint); `decap` uses a learned gate; `load` injects the source term. `EdgeAwareConv` is a generic alternative (`msg = MLP([x_i || x_j || edge_attr])`). One conv instance per edge relation, wrapped in `HeteroConv`, stacked **7 deep by default** with LayerNorm + residual.
+- `PDNEncoder` — emits per-node hidden representations across the two node types (`mesh_top`, `mesh_bot`).
+- `PDNDroopRegressor` — encoder + 2-layer MLP head applied per `load` edge, reading the edge's Vdd-side and Vss-side `mesh_bot` endpoint hidden states; predicts log10(droop) by default. ~1.0M parameters at the default `hidden_dim=64` and 7 layers.
 
 Train with:
 
