@@ -84,6 +84,58 @@ wire_width²`). Likewise the decap edges carry `C_decap` directly. This is the
 sense in which "edge weights are optimized": *they are not free parameters —
 they are downstream of the two knobs, and the gradient flows through them.*
 
+### 2.1 "But that's just a scalar multiply — where's the gradient?"
+
+A natural objection: turning `wire_width` into `R` is *just division by a
+scalar*, and that value is then *just used* by the message-passing convs — so
+where does differentiability come from? Two halves, both required, and both
+present here:
+
+1. **Scalar multiply / division is differentiable.** "Differentiable" means
+   "has a derivative," not "complicated" or "neural." `R = c / w` has derivative
+   `dR/dw = −c/w²`; a plain multiply `y = a·x` has derivative `a`. These are the
+   *cleanest* differentiable ops there are — being simple does not make them
+   non-differentiable.
+
+2. **It stays a tensor, so the link survives into message passing.** The only
+   way this breaks is leaving PyTorch. In `build_diff_data`, `wire_width` is a
+   torch tensor (from `sigmoid(z)`) and `R = Rsheet·pitch / wire_width` is a
+   *tensor op*, so `R` carries a `grad_fn` pointing back to `wire_width` — it is
+   an intermediate node in a live autograd graph, not a detached number. It is
+   then **used inside the conv's message** (`gate = exp(−α·ẑ(R))`, `msg = gate ·
+   delta_mlp(…)`), again through differentiable ops.
+
+So your reading is correct — the edge attribute *is* just used in message
+passing — with one precision: it's the **whole unbroken chain of tensor ops**
+that makes it differentiable, and that chain has two halves:
+
+```
+   wire_width ──(÷, a tensor op)──► R ──(used in the conv message)──► droop
+              └── upstream link ──┘   └──── downstream link ────────┘
+```
+
+- The **downstream** half ("used in message passing") carries the gradient
+  *backward from droop to R*.
+- The **upstream** half ("R built as a tensor op from the knob") carries it
+  *from R back to wire_width*.
+
+Both must be intact; here they are.
+
+**What would break it** (for contrast): `R = float(Rsheet * pitch / wire_width)`
+or `np.array(...)` or `R.detach()` anywhere on the path turns `R` into a dead
+constant — the conv would still run, but `∂droop/∂wire_width` would be zero. A
+non-smooth op (rounding `R`, an `argmax` over edges) would also sever it. The
+"differentiable graph builder" name is exactly the promise that none of these
+happen.
+
+**Fan-out.** One `wire_width` sets the same `R` on *every* strap edge of a
+layer, so at backward the gradients from all those edges sum back into the one
+scalar — still just the chain rule, with addition:
+
+```
+∂droop/∂wire_width = Σ_edges (∂droop/∂R_edge) · (∂R_edge/∂wire_width)
+```
+
 ---
 
 ## 3. The forward pass, layer by layer
