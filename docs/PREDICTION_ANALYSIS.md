@@ -185,6 +185,30 @@ This is the cleanest evidence that the OOD error is a **topology-coverage**
 problem, not a model-capacity problem: the error has spatial structure tied to
 the unseen pad layout, exactly where you'd predict.
 
+### 4.1 One chip, laid out — predicted vs actual at every load
+
+The aggregate stats above are easier to feel on a single instance. Here is one
+chip from the held-out topology (n_top = 4, an aggressive thin-wire / low-cap
+design), with all 14 load sources drawn at their physical mesh positions and
+colored by droop — surrogate prediction vs simulator ground truth, same scale:
+
+![Single-chip droop map](figures/fig_single_chip_droop.png)
+
+- **The spatial pattern is reproduced.** Both maps show the same gradient —
+  deepest droop in the interior / top, shallow near the pad-dense bottom edge —
+  so the model gets *which* loads are in trouble right, even on a topology it
+  never trained on. (Recall it does this with **no coordinate inputs**: the
+  spatial structure is inferred purely from connectivity and message passing.)
+- **The per-load scatter (right)** is the same chip's 14 sites against `y = x`:
+  R² = 0.62, MAE = 0.042 mV *for this single aggressive chip*. It's noisier than
+  the dataset aggregate (0.827) because one chip spans a narrow droop range and
+  this one sits in the hardest corner — but the ranking is intact and the
+  worst-load (pred 0.394 vs actual 0.387 mV) is nearly exact, which is the
+  number that sets the spec.
+
+Regenerate / retarget with `python3.12 scripts/plot_single_chip.py` (edit the
+`WIRE_WIDTH` / `C_DECAP` / `N_TOP` constants to inspect any chip).
+
 ---
 
 ## 5. Residual structure — is the error safe?

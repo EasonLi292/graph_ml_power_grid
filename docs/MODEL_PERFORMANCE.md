@@ -16,9 +16,11 @@ n_top = 4 (OOD), the only honest test.*
 Regenerate everything:
 
 ```bash
-python3.12 scripts/analyze_predictions.py     # forward-accuracy figures
-python3.12 scripts/plot_generation.py         # inverse-design figures
-python3.12 scripts/plot_surrogate_vs_sim.py   # surrogate-vs-simulator sweeps
+python3.12 scripts/analyze_predictions.py        # forward-accuracy figures
+python3.12 scripts/plot_generation.py            # inverse-design figures
+python3.12 scripts/plot_surrogate_vs_sim.py      # surrogate-vs-simulator sweeps
+python3.12 scripts/plot_designspace_pred_vs_sim.py  # 2-D + capacitance sweeps
+python3.12 scripts/plot_single_chip.py           # per-chip spatial droop map
 ```
 
 ---
@@ -32,7 +34,17 @@ In-distribution (left, middle) the predictions collapse onto `y = x`. On the
 monotonic — high-droop designs are still predicted high. This single figure is
 the "does it work?" answer. → [PREDICTION_ANALYSIS.md](PREDICTION_ANALYSIS.md)
 
-## 2. Correlation vs precision — error by droop magnitude
+## 2. One chip, laid out — predicted vs actual at every load
+
+![Single-chip droop map](figures/fig_single_chip_droop.png)
+
+The most intuitive view: a single chip (held-out n_top = 4) with all 14 load
+sources at their physical mesh locations, colored by droop — predicted vs
+actual, same scale — plus the per-load scatter. The spatial droop gradient is
+reproduced even though the model sees **no coordinates**, and the worst load
+(the spec-setting one) is nearly exact. → §4.1 of the prediction analysis.
+
+## 3. Correlation vs precision — error by droop magnitude
 
 ![Error vs magnitude](figures/fig_error_vs_magnitude.png)
 
@@ -41,7 +53,7 @@ tail (~15%) and best at deep droop (~6%) — i.e. the model is most trustworthy
 exactly where droop is large and decisions are made. → §2 of the prediction
 analysis.
 
-## 3. Coordinate-free vs coordinate-using representation
+## 4. Coordinate-free vs coordinate-using representation
 
 ![Coord-free vs coords](figures/fig_coord_vs_nocoord.png)
 
@@ -49,7 +61,7 @@ Dropping absolute coordinates (6-dim → 2-dim node features) costs only ~0.04
 R² while removing a non-transferable shortcut. The headline trade behind the
 current model. → §6 of the prediction analysis.
 
-## 4. Inferred vs actual droop — surrogate vs simulator
+## 5. Inferred vs actual droop — surrogate vs simulator
 
 ![Inferred vs actual scatter](figures/fig_inferred_vs_actual.png)
 
@@ -58,7 +70,7 @@ points sit on `y = x`; OOD points ride **above** (conservative / safe) and peel
 away at the low-droop end, where the surrogate refuses to follow the simulator
 down. → §4 of [GENERATION_ANALYSIS.md](GENERATION_ANALYSIS.md).
 
-## 5. Where the surrogate fails — non-monotonicity on the unseen topology
+## 6. Where the surrogate fails — non-monotonicity on the unseen topology
 
 ![Surrogate vs sim sweep](figures/fig_surrogate_vs_sim_sweep.png)
 
@@ -68,7 +80,7 @@ turns *up* with more copper, which is unphysical and causes one false-infeasible
 verdict. On n_top = 3 (right) it tracks the simulator perfectly. → §4 of the
 generation analysis.
 
-## 6. Predicted vs actual across the full 2-D design space
+## 7. Predicted vs actual across the full 2-D design space
 
 ![Predicted vs actual across the 2-D design space](figures/fig_designspace_pred_vs_sim.png)
 
@@ -79,7 +91,7 @@ conservative). A companion [capacitance sweep](figures/fig_cap_sweep_pred_vs_sim
 shows the distortion is **wire-axis-specific** — along decap the OOD surrogate
 is monotonic and only mildly conservative. → §4.1 of the generation analysis.
 
-## 7. Surrogate fidelity at the design optimum
+## 8. Surrogate fidelity at the design optimum
 
 ![Surrogate fidelity at optimum](figures/fig_surrogate_fidelity.png)
 
