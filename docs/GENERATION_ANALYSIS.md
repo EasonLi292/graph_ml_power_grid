@@ -63,6 +63,11 @@ need for a projection step inside the loop. The hinge loss is zero as soon as
 the design is feasible, so the cost term then pulls the solution down to the
 **cheapest point on the spec boundary**.
 
+> For the **layer-by-layer mechanics** — how the knobs become edge attributes,
+> how the gradient backpropagates through the *frozen* network to the two knobs,
+> and why "frozen weights" still gives a usable input-gradient — see
+> [INVERSE_DESIGN_MECHANICS.md](INVERSE_DESIGN_MECHANICS.md).
+
 ---
 
 ## 2. Full results
