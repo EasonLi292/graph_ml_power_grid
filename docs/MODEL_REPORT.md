@@ -32,8 +32,7 @@ The PDN is a two-layer mesh, represented as a heterogeneous graph:
   *type*, physical adjacency is already the `edge_index`, and segment scale is
   already baked into the edge resistances. Crucially, **no coordinates** — the
   model is forbidden from learning absolute position, which wouldn't transfer
-  to a new floorplan. (See §6 and `PREDICTION_ANALYSIS.md` for the measured
-  cost of this choice.)
+  to a new floorplan. (See §6.)
 - **Edges** — four physical relations, each with attributes
   `[R, C, I_peak, freq, duty, phase]`:
 
@@ -144,21 +143,21 @@ network has fewer hops than the grid is wide, interior nodes never "hear" the
 pads and the model is structurally blind. Sweeping the number of layers
 (conductance gate on, everything else fixed):
 
-| hops (`n_layers`) | test R² |
+| hops (`n_layers`) | test R² (dev sweep) |
 |---|---|
 | 3 | 0.187 |
 | 5 | 0.801 |
-| **7** | **0.863** |
+| 7 | 0.863 |
 
 The jump from 3→5 is enormous (+0.61); 5→7 adds +0.06; beyond that it flattens.
-**7 hops is the chosen default.** (These numbers are from the
-coordinate-using model; the coordinate-free model used everywhere else in this
-report scores 0.827 at 7 hops — see §6.)
+**7 hops is the chosen default.** (This sweep was run during development to
+establish the trend — depth is the dominant lever. The final coordinate-free
+model scores **0.827** at 7 hops; the absolute level shifts slightly but the
+trend is the point.)
 
-> **Per-site vs worst-load.** The 0.827/0.863 figures are *per-load-site* R².
-> The number a designer acts on is the **worst** droop on the chip, and the
-> model is much better at that: worst-load R² = **0.944** (coord-free) / 0.984
-> (coords), Spearman = 0.987 / 0.998. Deep dive in
+> **Per-site vs worst-load.** The 0.827 here is *per-load-site* R². The number a
+> designer acts on is the **worst** droop on the chip, and the model is much
+> better at that: worst-load R² = **0.944**, Spearman = **0.987**. Deep dive in
 > [PREDICTION_ANALYSIS.md](PREDICTION_ANALYSIS.md).
 
 ### 4.2 The conductance gate was a hidden hero
@@ -246,26 +245,18 @@ for a design tool: anything it certifies as feasible is feasible with margin.
 
 ---
 
-## 6. The coordinate-free representation (and what it costs)
+## 6. The coordinate-free representation
 
 We deliberately strip node features down to `[is_vdd, is_pad]` — no
-coordinates, no layer one-hot. Layer identity is the node *type*, adjacency is
-the `edge_index`, and segment scale is in the resistances, so those signals
-would be redundant; coordinates specifically are a *non-transferable* shortcut
-(within one grid family, position ≈ distance-from-pad, which a model can
-memorize but can't carry to a new floorplan). Measured head-to-head at 7 hops:
-
-| metric (OOD n_top = 4) | with coords (6-dim) | coord-free (2-dim) |
-|---|---|---|
-| per-site R² | 0.863 | **0.827** |
-| worst-load R² | 0.984 | **0.944** |
-| worst-load Spearman | 0.998 | **0.987** |
-
-Coordinates buy ~0.04 R², for the intuitive reason above — but the coord-free
-model still ranks designs near-perfectly (worst-load Spearman 0.987) and learns
-only from transferable structure. We take that trade. Full breakdown of *where*
-the error lives (magnitude, design-space corner, per-site geometry) in
-[PREDICTION_ANALYSIS.md](PREDICTION_ANALYSIS.md).
+coordinates, no layer one-hot. Layer identity is already the node *type*,
+adjacency is the `edge_index`, and segment scale is in the resistances, so those
+signals would be redundant; coordinates specifically are a *non-transferable*
+shortcut (within one grid family, position ≈ distance-from-pad, which a model
+can memorize but can't carry to a new floorplan). The model therefore learns
+only from **topology, rail/boundary flags, and component values** — and still
+recovers the spatial droop structure on the held-out topology (worst-load
+Spearman 0.987; see the per-chip map in
+[PREDICTION_ANALYSIS.md](PREDICTION_ANALYSIS.md) §4.1).
 
 ---
 

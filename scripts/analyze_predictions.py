@@ -33,9 +33,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from eason import EncoderConfig, PDNDroopRegressor
-from eason.encoder import PDNEncoder
-from eason.schema import NODE_TYPES
-from tools.grid_construction import build_regular_pdn
 from tools.pyg_dataset import LOG_FLOOR, RegularPDNDataset
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,50 +43,14 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DATA_H5 = ROOT / "datasets" / "regular_v5" / "dataset.h5"
 NOCOORD_CKPT = ROOT / "checkpoints" / "droop_v5_nocoord.pt"
-COORD_CKPT = ROOT / "checkpoints" / "droop_v5_hop7.pt"
-
-NODE_TYPE_IDX = {"mesh_top": 0, "mesh_bot": 1}
 
 
-# ---------------------------------------------------------------------------
-# 6-dim node-feature reconstruction for the legacy coordinate model.
-# Layout: [one_hot_type(2), is_vdd, is_pad, x, y]  (matches pre-refactor code).
-# ---------------------------------------------------------------------------
-
-def _coord_feats(n_top: int) -> dict[str, torch.Tensor]:
-    g = build_regular_pdn(n_top=n_top)
-
-    def feat(node_type, pos, is_vdd, is_pad):
-        n = pos.shape[0]
-        oh = np.zeros((n, 2), dtype=np.float32)
-        oh[:, NODE_TYPE_IDX[node_type]] = 1.0
-        return torch.from_numpy(
-            np.column_stack(
-                [oh, is_vdd.astype(np.float32), is_pad.astype(np.float32),
-                 pos.astype(np.float32)]
-            )
-        )
-
-    return {
-        "mesh_top": feat("mesh_top", g.top_pos, g.top_is_vdd, g.top_is_pad),
-        "mesh_bot": feat("mesh_bot", g.bot_pos, g.bot_is_vdd,
-                         np.zeros(g.n_bot_nodes, dtype=np.int8)),
-    }
-
-
-def load_model(ckpt: Path, node_dim: int = 2) -> PDNDroopRegressor:
-    # The legacy coordinate model has a 6-dim node_proj; temporarily widen
-    # the encoder's input dim so its state_dict loads cleanly.
-    saved = dict(PDNEncoder.NODE_IN_DIM)
-    PDNEncoder.NODE_IN_DIM = {nt: node_dim for nt in NODE_TYPES}
-    try:
-        model = PDNDroopRegressor(
-            EncoderConfig(hidden_dim=64, n_layers=7, conv_type="admittance",
-                          drop_edge_p=0.0),
-            target_space="log",
-        )
-    finally:
-        PDNEncoder.NODE_IN_DIM = saved
+def load_model(ckpt: Path) -> PDNDroopRegressor:
+    model = PDNDroopRegressor(
+        EncoderConfig(hidden_dim=64, n_layers=7, conv_type="admittance",
+                      drop_edge_p=0.0),
+        target_space="log",
+    )
     state = torch.load(ckpt, map_location="cpu", weights_only=False)
     model.load_state_dict(state["model"])
     model.eval()
@@ -97,7 +58,7 @@ def load_model(ckpt: Path, node_dim: int = 2) -> PDNDroopRegressor:
 
 
 @torch.no_grad()
-def predict_split(model, split: str, coord: bool, batch_size: int = 64):
+def predict_split(model, split: str, batch_size: int = 64):
     """Return per-load-site arrays for one split.
 
     Columns: pred_v, true_v (volts), n_top, wire_width, C_decap, site_idx,
@@ -105,7 +66,6 @@ def predict_split(model, split: str, coord: bool, batch_size: int = 64):
     """
     ds = RegularPDNDataset(DATA_H5, split=split, target="log")
     n_loads = ds._n_loads
-    coord_cache = {nt: _coord_feats(nt) for nt in (3, 4, 7)} if coord else None
 
     preds, trues, ntops, wws, cds, sites, sids = [], [], [], [], [], [], []
     buf, meta = [], []
@@ -131,11 +91,7 @@ def predict_split(model, split: str, coord: bool, batch_size: int = 64):
 
     for i in range(len(ds)):
         data = ds[i]
-        nt = int(data["mesh_bot"].x.shape[0] and ds._n_top[i])
-        if coord:
-            cf = coord_cache[nt]
-            data["mesh_top"].x = cf["mesh_top"].clone()
-            data["mesh_bot"].x = cf["mesh_bot"].clone()
+        nt = int(ds._n_top[i])
         y_true = data["y"].numpy()
         ww = float(ds._global[i, ds._ww_col]); cd = float(ds._global[i, ds._cd_col])
         buf.append(data)
@@ -358,49 +314,14 @@ def fig_residual(test):
     plt.close(fig)
 
 
-def fig_coord_vs_nocoord(summary):
-    groups = [("n_top=3\n(train)", 3, "train"), ("n_top=7\n(train)", 7, "train"),
-              ("n_top=4\n(OOD)", 4, "test")]
-    labels = [g[0] for g in groups]
-    nc_r2 = [summary["nocoord"][f"{s}_n{nt}"]["r2"] for _, nt, s in groups]
-    co_r2 = [summary["coord"][f"{s}_n{nt}"]["r2"] for _, nt, s in groups]
-    nc_mae = [summary["nocoord"][f"{s}_n{nt}"]["mae_mV"] for _, nt, s in groups]
-    co_mae = [summary["coord"][f"{s}_n{nt}"]["mae_mV"] for _, nt, s in groups]
-
-    x = np.arange(len(groups)); w = 0.35
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
-    ax1.bar(x - w / 2, co_r2, w, label="with coords (6-dim)", color="#888")
-    ax1.bar(x + w / 2, nc_r2, w, label="coord-free (2-dim)", color="#2c6fbb")
-    ax1.set_xticks(x); ax1.set_xticklabels(labels)
-    ax1.set_ylabel("R²"); ax1.set_ylim(0, 1.02); ax1.set_title("Correlation (R²)")
-    ax1.legend()
-    for xi, v in zip(x - w / 2, co_r2):
-        ax1.text(xi, v + 0.01, f"{v:.3f}", ha="center", fontsize=8)
-    for xi, v in zip(x + w / 2, nc_r2):
-        ax1.text(xi, v + 0.01, f"{v:.3f}", ha="center", fontsize=8)
-
-    ax2.bar(x - w / 2, co_mae, w, label="with coords (6-dim)", color="#888")
-    ax2.bar(x + w / 2, nc_mae, w, label="coord-free (2-dim)", color="#c0392b")
-    ax2.set_xticks(x); ax2.set_xticklabels(labels)
-    ax2.set_ylabel("MAE (mV)"); ax2.set_title("Precision (MAE)")
-    ax2.legend()
-    fig.suptitle("Coordinate-free vs coordinate-using representation", fontsize=13)
-    fig.tight_layout()
-    fig.savefig(FIG_DIR / "fig_coord_vs_nocoord.png", dpi=130)
-    plt.close(fig)
-
-
 def main() -> None:
-    print("Loading models...")
+    print("Loading model...")
     nocoord = load_model(NOCOORD_CKPT)
-    coord = load_model(COORD_CKPT, node_dim=6) if COORD_CKPT.exists() else None
 
     splits = ["train", "val", "test"]
-    nocoord_by_split = {s: predict_split(nocoord, s, coord=False) for s in splits}
-    coord_by_split = ({s: predict_split(coord, s, coord=True) for s in splits}
-                      if coord is not None else None)
+    nocoord_by_split = {s: predict_split(nocoord, s) for s in splits}
 
-    summary = {"nocoord": {}, "coord": {}}
+    summary = {"nocoord": {}}
 
     def fill(tag, by_split):
         out = {}
@@ -417,8 +338,6 @@ def main() -> None:
         summary[tag] = out
 
     fill("nocoord", nocoord_by_split)
-    if coord_by_split is not None:
-        fill("coord", coord_by_split)
 
     # ---- figures ----
     print("Rendering figures...")
@@ -427,8 +346,6 @@ def main() -> None:
     fig_designspace_error(nocoord_by_split["test"])
     fig_per_site(nocoord_by_split["test"])
     fig_residual(nocoord_by_split["test"])
-    if coord_by_split is not None:
-        fig_coord_vs_nocoord(summary)
 
     (DATA_DIR / "prediction_metrics.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))

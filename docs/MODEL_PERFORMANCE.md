@@ -53,15 +53,7 @@ tail (~15%) and best at deep droop (~6%) — i.e. the model is most trustworthy
 exactly where droop is large and decisions are made. → §2 of the prediction
 analysis.
 
-## 4. Coordinate-free vs coordinate-using representation
-
-![Coord-free vs coords](figures/fig_coord_vs_nocoord.png)
-
-Dropping absolute coordinates (6-dim → 2-dim node features) costs only ~0.04
-R² while removing a non-transferable shortcut. The headline trade behind the
-current model. → §6 of the prediction analysis.
-
-## 5. Inferred vs actual droop — surrogate vs simulator
+## 4. Inferred vs actual droop — surrogate vs simulator
 
 ![Inferred vs actual scatter](figures/fig_inferred_vs_actual.png)
 
@@ -70,7 +62,7 @@ points sit on `y = x`; OOD points ride **above** (conservative / safe) and peel
 away at the low-droop end, where the surrogate refuses to follow the simulator
 down. → §4 of [GENERATION_ANALYSIS.md](GENERATION_ANALYSIS.md).
 
-## 6. Where the surrogate fails — non-monotonicity on the unseen topology
+## 5. Where the surrogate fails — non-monotonicity on the unseen topology
 
 ![Surrogate vs sim sweep](figures/fig_surrogate_vs_sim_sweep.png)
 
@@ -80,7 +72,7 @@ turns *up* with more copper, which is unphysical and causes one false-infeasible
 verdict. On n_top = 3 (right) it tracks the simulator perfectly. → §4 of the
 generation analysis.
 
-## 7. Predicted vs actual across the full 2-D design space
+## 6. Predicted vs actual across the full 2-D design space
 
 ![Predicted vs actual across the 2-D design space](figures/fig_designspace_pred_vs_sim.png)
 
@@ -91,7 +83,7 @@ conservative). A companion [capacitance sweep](figures/fig_cap_sweep_pred_vs_sim
 shows the distortion is **wire-axis-specific** — along decap the OOD surrogate
 is monotonic and only mildly conservative. → §4.1 of the generation analysis.
 
-## 8. Surrogate fidelity at the design optimum
+## 7. Surrogate fidelity at the design optimum
 
 ![Surrogate fidelity at optimum](figures/fig_surrogate_fidelity.png)
 

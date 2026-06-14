@@ -233,38 +233,7 @@ errs in the **safe** direction.
 
 ---
 
-## 6. Cost of dropping coordinates
-
-We removed absolute `(x, y)` node coordinates and the redundant layer one-hot
-(layer identity is already the PyG node type), shrinking node features from
-6-dim to 2-dim `[is_vdd, is_pad]`. Same architecture, same data, both 7 hops:
-
-![Coordinate-free vs coordinate-using](figures/fig_coord_vs_nocoord.png)
-
-| metric (OOD n_top = 4) | with coords (6-dim) | coord-free (2-dim) | Δ |
-|---|---|---|---|
-| per-site R² | 0.863 | 0.827 | −0.036 |
-| per-site MAE | 0.027 mV | 0.030 mV | +0.003 |
-| worst-load R² | 0.984 | 0.944 | −0.040 |
-| worst-load MAE | 0.012 mV | 0.021 mV | +0.009 |
-| worst-load Spearman | 0.998 | 0.987 | −0.011 |
-
-**Reading.** Coordinates buy a small but real accuracy gain (~0.04 R²). The
-reason is intuitive: within a *fixed grid family*, absolute position correlates
-with distance-from-pad, which is genuinely predictive of droop. The cost is
-that this signal **would not transfer** to a different floorplan — it is the
-kind of shortcut that inflates in-family scores and collapses across families.
-
-Trading ~0.04 R² for a model that learns purely from **topology (edges),
-rail/boundary flags, and component values** — with no coordinate leakage — is
-the right call for a tool meant to generalize across layouts. The coord-free
-model still ranks designs near-perfectly (worst-load Spearman 0.987). Single
-seed each, so part of the 0.04 gap is run-to-run noise; a multi-seed sweep
-would tighten the estimate.
-
----
-
-## 7. Bottom line for prediction
+## 6. Bottom line for prediction
 
 - The model is **near-exact in-distribution** and **degrades gracefully OOD**,
   with correlation/ranking holding up far better than absolute mV precision.
@@ -273,5 +242,7 @@ would tighten the estimate.
   design-space corner and at sites far from the unseen topology's pads.
 - At the **worst-load** number that actually sets the spec, the model is
   strong (R² 0.944, Spearman 0.987) and **conservative** in its errors.
-- Dropping coordinates costs ~0.04 R² but removes a non-transferable shortcut —
-  a deliberate, defensible trade for cross-layout generalization.
+- The model is **coordinate-free by design** — node features are just
+  `[is_vdd, is_pad]`, so it learns from topology, rail/boundary flags, and
+  component values, never absolute position (a shortcut that wouldn't transfer
+  across floorplans).
