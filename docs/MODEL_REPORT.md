@@ -100,7 +100,9 @@ So the test number is a true out-of-distribution (OOD) check: the model must
 Each layer lets every node exchange information with its neighbors, then
 updates its hidden state (with a residual connection + LayerNorm). Stacking
 `N` layers means information can travel `N` hops across the grid. Hidden width
-is 64.
+is 64. The whole model is **1,000,093 parameters (~4 MB)** — the conv stack is
+98.6% of that; exact per-layer/per-relation breakdown in
+[MODEL_SIZE.md](MODEL_SIZE.md).
 
 ### 3.2 The conductance gate — the physics trick
 
