@@ -301,4 +301,5 @@ the error lives (magnitude, design-space corner, per-site geometry) in
   unseen topologies).
 - **Deeper dives:** [PREDICTION_ANALYSIS.md](PREDICTION_ANALYSIS.md) (forward
   accuracy, where it differs) and [GENERATION_ANALYSIS.md](GENERATION_ANALYSIS.md)
-  (inverse design).
+  (inverse design). For a quick visual scan, the curated
+  [MODEL_PERFORMANCE.md](MODEL_PERFORMANCE.md) figure gallery.

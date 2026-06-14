@@ -29,11 +29,14 @@ python3.12 scripts/plot_generation.py   # figures from the captured table
 - **On the unseen topology (n_top 4), the surrogate is systematically
   conservative** — it predicts a touch *higher* droop than the simulator
   measures. For a safety-margin tool, erring high is the right way to be wrong.
-- **The honest caveat:** the optimizer is only as good as the surrogate's
-  gradient. On the OOD topology that gradient is noisier, and one case
-  (n_top = 4 @ 0.10 mV) settled in a local minimum instead of pushing wire
-  width to the ceiling. The verdict was still correct (infeasible), but via a
-  worse design point than the in-distribution cases found.
+- **The honest caveat — one false rejection.** On the unseen topology the
+  surrogate is not just imprecise, it is **non-monotonic in wire width**: it
+  predicts droop *bottoms out and then rises* as copper increases, which is
+  unphysical. For n_top = 4 @ 0.10 mV this trapped the optimizer at the
+  surrogate's spurious minimum (wire ≈ 0.74) and produced a **false-infeasible**
+  verdict — the simulator says the spec *is* achievable at full wire (0.098 mV ≤
+  0.10). So conservatism keeps bad designs from passing, but here it wrongly
+  rejected a good one. Detail + figure in §4.
 
 ---
 
@@ -70,8 +73,8 @@ ground-truth worst-load droop at the *recovered* design:
 
 | budget | n_top | wire_width | C_decap (F) | pred (mV) | **sim (mV)** | verdict |
 |---|---|---|---|---|---|---|
-| 0.10 mV | 3 | 0.986 | 7.2e-10 | 0.113 | 0.113 | ✗ infeasible |
-| | **4 (OOD)** | 0.736 | 7.7e-10 | 0.141 | 0.122 | ✗ infeasible |
+| 0.10 mV | 3 | 0.986 | 7.2e-10 | 0.113 | 0.113 | ✗ truly infeasible |
+| | **4 (OOD)** | 0.736 | 7.7e-10 | 0.141 | 0.122 | ✗ **false reject** (see §4) |
 | | 7 | 0.831 | 2.3e-10 | 0.099 | 0.099 | ✓ |
 | 0.15 mV | 3 | 0.909 | 4.2e-10 | 0.134 | 0.134 | ✓ |
 | | **4 (OOD)** | 0.713 | 5.6e-10 | 0.150 | 0.132 | ✓ |
@@ -80,8 +83,10 @@ ground-truth worst-load droop at the *recovered* design:
 | | **4 (OOD)** | 0.631 | 2.4e-10 | 0.196 | 0.183 | ✓ |
 | | 7 | 0.448 | 5.1e-11 | 0.197 | 0.197 | ✓ |
 
-Every ✗ verdict is genuinely at/over budget in the simulator — there are **no
-false "feasible" claims** that the simulator overturns.
+There are **no false "feasible" claims** that the simulator overturns — every
+design the tool *certifies* is genuinely within budget. The one error runs the
+other way: at 0.10 mV / n_top = 4 the tool *rejects* a spec the simulator says
+is achievable (§4).
 
 ---
 
@@ -108,6 +113,8 @@ the model accurate *where the optimizer lands*?"
 This validates the model **for design** far more directly than the aggregate
 R² does. A 0.827 per-site R² sounds mediocre; a surrogate that lands on y = x
 in-distribution and stays on the safe side OOD is a usable design oracle.
+(The flip side of that conservatism — it can *reject* a feasible spec — is the
+subject of §4.)
 
 ### 3.2 Looser budget → less copper (monotone cost/performance)
 
@@ -135,35 +142,94 @@ Where feasible, simulated droop sits right at the budget (0.200/0.200,
 recovered design is the *cheapest* one that meets spec, which is the entire
 point of inverse design.
 
-### 3.5 It reports honest infeasibility
+### 3.5 It reports honest infeasibility (when it's real)
 
 At 0.10 mV with only 3 pads, the optimizer drives wire width to the ceiling
 (0.986) and the simulator still measures 0.113 mV > 0.10 — and the tool says
 so (✗). It does not invent a design or silently return an over-budget grid.
 That budget is genuinely unachievable for a sparse grid within the knob ranges.
+(The n_top = 4 case at the same budget is a *different* story — §4.)
 
 ---
 
-## 4. The honest caveat — optimizer ≠ surrogate
+## 4. The one failure — surrogate non-monotonicity → a false rejection
 
-The loop has two failure modes, and only one is the surrogate's fault.
+Earlier I called the n_top = 4 @ 0.10 mV case a "local minimum." That
+undersells it. Sweeping the surrogate and the simulator along wire width (decap
+pinned near its ceiling) shows what actually goes wrong:
 
-1. **Surrogate error** (covered above): bounded, and conservative on OOD.
+![Inferred vs actual droop vs wire width](figures/fig_surrogate_vs_sim_sweep.png)
 
-2. **Optimizer landing in a local minimum.** The n_top = 4 @ 0.10 mV case is the
-   tell. The in-distribution cases that can't meet a tight budget push wire
-   width all the way to the ceiling (≈ 0.99). The OOD case instead settled at
-   wire_width = 0.736 — *not* the ceiling — and reported infeasible from there.
-   The verdict is still correct (sim = 0.122 > 0.10), but it stopped at a worse
-   design point. The cause is the noisier surrogate gradient on the unseen
-   topology (§4 of the prediction analysis: error has spatial structure tied to
-   the unseen pad layout, which makes the loss surface bumpier). This is an
-   *optimization* artifact, not a wrong droop prediction.
+- **Left (n_top = 4, OOD):** the simulator (blue) is monotonic — more copper
+  always means less droop, all the way down to **0.098 mV at full wire, which
+  *meets* the 0.10 spec.** The surrogate (red) tracks it down to wire ≈ 0.74,
+  then **flattens and turns back up** — it predicts droop *increases* with more
+  copper, which is physically impossible. The optimizer faithfully descends to
+  the surrogate's minimum at ≈ 0.74 and stops; from there the tiny cost term
+  even discourages adding the wire that would actually fix the droop.
+- **Right (n_top = 3, in-dist):** surrogate and simulator are indistinguishable
+  — clean, monotonic, exactly as a trustworthy surrogate should behave.
 
-**Mitigations** (not yet applied): multi-start `z` (take the best of N random
-inits), a feasibility margin (`optimize against budget·(1−ε)` so boundary cases
-land safely under spec), or a short simulator-in-the-loop refinement after the
-surrogate proposes a starting point.
+The same data as a direct inferred-vs-actual scatter — in-distribution points
+sit on `y = x`; the OOD points ride above it and, at the low-droop end (high
+wire), peel away as the surrogate refuses to come down:
+
+![Inferred vs actual scatter](figures/fig_inferred_vs_actual.png)
+
+### 4.1 Predicted vs actual across the *whole* design space
+
+Sweeping **both** knobs (wire_width × C_decap) and comparing predicted to actual
+droop as paired heatmaps confirms the failure is localized — and reveals it is
+**axis-specific**:
+
+![Predicted vs actual across the 2-D design space](figures/fig_designspace_pred_vs_sim.png)
+
+- **Bottom row (n_top = 3, in-dist):** predicted and actual maps are
+  indistinguishable; the error panel is ±0.004 mV of noise.
+- **Top row (n_top = 4, OOD):** the bulk still matches, but the error panel
+  lights up a **red blob at the fat-wire edge** — up to ~0.10 mV of
+  *over*-prediction (25× the in-dist error), concentrated exactly where the
+  wire-width non-monotonicity lives. Note the error is one-signed (red =
+  conservative) almost everywhere — the model rarely under-predicts.
+
+A 1-D capacitance sweep (the knob we had *not* yet swept) isolates which axis is
+to blame:
+
+![Inferred vs actual vs decap](figures/fig_cap_sweep_pred_vs_sim.png)
+
+Along **capacitance** the OOD surrogate is **monotonic** and only mildly
+conservative (a small, well-behaved offset). The pathology is specific to the
+**wire-width / conductance** axis — which is exactly the axis the physics-shaped
+conductance gate acts on, and the one the optimizer leans on hardest to cut
+droop. So the OOD weakness isn't diffuse; it's a single, identifiable,
+fixable distortion in the wire-width response.
+
+**Consequences and correct framing.**
+
+1. **This is a false rejection, not a correct infeasibility verdict.** The
+   simulator says the spec is achievable (0.098 ≤ 0.10); the tool reported ✗.
+   Conservatism (over-predicting droop) protects against the *dangerous* error —
+   certifying a bad grid as good — but its price is exactly this: it can declare
+   an achievable spec infeasible and leave performance on the table.
+2. **The fault is the surrogate's response surface, not the optimizer.** Adam
+   did its job; it minimized a function that is wrong outside its training
+   support. The model never saw n_top = 4, so it doesn't respect the monotone
+   "more copper → less droop" constraint there.
+3. **Root cause is topology coverage** — the same gap behind every OOD number in
+   [PREDICTION_ANALYSIS.md](PREDICTION_ANALYSIS.md).
+
+**Fixes that actually address it** (not yet applied):
+
+- **More training topologies** — the real fix; makes the surface monotonic on
+  n_top = 4 by giving the model support there.
+- **Enforced monotonicity** in wire/conductance (a monotone sub-network, or a
+  training penalty on `∂droop/∂wire > 0`) — guarantees the physics regardless of
+  coverage.
+- **Simulator-in-the-loop refinement** after the surrogate proposes — would have
+  caught that full wire meets spec.
+- *Multi-start `z` would **not** fix this one* — the surrogate's own global
+  optimum is the bad point, so every restart converges to the same place. (It
+  still helps the generic local-minimum case; it just isn't the cure here.)
 
 ---
 
@@ -172,11 +238,14 @@ surrogate proposes a starting point.
 - Gradient inverse design through the frozen surrogate **recovers correct,
   cheapest-feasible designs** and tells a coherent physical story end to end:
   monotone cost vs budget, copper scaling with topology difficulty, boundary
-  landing, and honest infeasibility.
+  landing, and genuine infeasibility flags.
 - **Surrogate fidelity holds where it's used.** In-distribution predictions
-  land on the simulator; on the unseen topology they are conservative (safe).
-- The remaining weakness is **optimization robustness on OOD topologies**, not
-  prediction accuracy — addressable with multi-start and a feasibility margin.
+  land on the simulator; on the unseen topology they are conservative (safe
+  against shipping bad grids).
+- The remaining weakness is the surrogate's **non-monotonic, over-pessimistic
+  response on OOD topologies**, which cost one *false rejection* (not a
+  dangerous false pass). The cure is topology coverage and/or enforced
+  monotonicity — a model/data fix, addressable.
 - For a real flow, the recommended use is exactly what we do here: **surrogate
   proposes, simulator confirms.** The surrogate collapses a slow search into a
   handful of candidate designs; the simulator certifies the final pick.

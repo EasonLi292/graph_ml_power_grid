@@ -77,6 +77,49 @@ per-site R² suggests.**
 cloud fans out but stays tightly correlated and monotonic — high-droop designs
 are still predicted high.*
 
+### 1.1 Why is worst-load R² (0.944) so much higher than per-site (0.827)?
+
+First, the architecture, because it explains that there is **no separate
+worst-load model**. The regressor ([`eason/encoder.py`](../eason/encoder.py)) is:
+
+- a **shared encoder** — node features `[is_vdd, is_pad]` → 7 message-passing
+  layers (conductance gate on resistor edges, residual + LayerNorm) → a 64-dim
+  hidden state for *every* mesh node, encoding where it sits in the supply
+  network;
+- a **shared per-load head** — each `load` edge is directed Vdd→Vss; the head
+  reads the two endpoint hidden states `[h_vdd ‖ h_vss]` and an MLP
+  (128→64→1) emits one `log10(droop)`. Run once per load edge ⇒ **14
+  predictions per grid, same weights**.
+
+**Worst-load is simply `max` over those 14 per-site outputs** — not a different
+head. So the R² gap is a property of the *target statistics*, and `max` improves
+both halves of `R² = 1 − (error variance)/(target variance)`:
+
+| OOD n_top = 4 | per-site (28 000) | worst-load (2 000) |
+|---|---|---|
+| target mean | 0.192 mV | 0.269 mV |
+| **target variance** (denominator) | 0.0089 | **0.0110** |
+| **RMSE** (numerator) | 0.039 mV | **0.025 mV** |
+| R² = 1 − RMSE²/var | 0.827 | 0.944 |
+
+1. **Smaller error (numerator).** The worst site is always a *deep-droop* site,
+   and deep droop is where the model is **relatively** most accurate (~8% vs
+   ~15% rel-error — §2). Comparing `max(pred)` to `max(true)` also cancels
+   *which-site-is-worst* misranking: getting magnitudes roughly right but
+   swapping two near-equal deepest sites barely moves the max-to-max error.
+   Per-site error, by contrast, is dragged up by the many shallow sites.
+2. **Larger, cleaner variance (denominator).** The per-site target's variance
+   splits **43% within-design** (spread across the 14 sites, set by fine
+   load-site geometry) and 57% across-design. That within-design part is the
+   *hardest* thing to predict OOD — it depends on the exact pad spacing the
+   model never saw (§4). The `max` **collapses that hard within-design variation
+   away** and keeps only the across-design trend (wire / decap / topology →
+   worst droop), which the model captures well.
+
+In short: the `max` discards precisely the variation the model is worst at on an
+unseen topology and keeps the variation it is best at — which is also the only
+number a designer acts on.
+
 ---
 
 ## 2. Where precision differs #1 — droop magnitude
