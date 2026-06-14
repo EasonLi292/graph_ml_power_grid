@@ -10,11 +10,11 @@ As process nodes shrink and current densities climb, IR drop on the on-die power
 
 ## Architecture
 
-This project reuses the encoder/decoder VAE skeleton from [Z-GED](https://github.com/EasonLi292/Z-GED), retargeted from RLC filter synthesis to power-grid analysis.
+The intended architecture follows the encoder/decoder VAE design from [Z-GED](https://github.com/EasonLi292/Z-GED) (originally for RLC filter synthesis), retargeted to power-grid analysis. **So far only the encoder and a supervised droop head are built** — the generative/VAE parts are planned (see below).
 
-- **Encoder — impedance-aware GNN.** Three message-passing layers operating over the PDN graph. Nodes represent grid taps, vias, and instance pins; edges carry per-segment resistance (and inductance/capacitance for dynamic analysis). Hierarchical latent branches separate topology, per-segment electrical values, and load/source conditions, mirroring the Z-GED `[z_topology | z_values | z_pz]` split — here repurposed as `[z_topology | z_RLC | z_loads]`.
-- **Decoder (planned) — autoregressive transformer.** A GPT-style decoder that, depending on the head, either (a) reconstructs the PDN as an Eulerian walk over the grid for self-supervised pretraining, or (b) emits per-node voltage / IR-drop predictions conditioned on the latent code and the load configuration. Not yet implemented — only the encoder + regression head currently exist.
-- **Training as a VAE (planned).** The model is to be pretrained as a variational autoencoder on PDN graphs so that the latent space captures grid topology and impedance structure, with a supervised head then fine-tuned against the MNA-solver ground truth. Currently only the supervised regression head is wired up.
+- **Encoder — message-passing GNN.** Seven message-passing layers over the heterogeneous PDN graph (`mesh_top` / `mesh_bot` nodes; `strap` / `via` / `decap` / `load` edges), producing a 64-dim hidden state per node. Resistor edges (`strap`, `via`) use a physics-shaped **conductance gate** so the message weight tracks `1/R`; every layer has LayerNorm + a residual. The encoder is a plain stack of conv layers — there is **no VAE bottleneck or latent split** in the model that exists today.
+- **Droop head.** For each `load` edge the head reads the hidden states of its two endpoints — the Vdd-side and Vss-side `mesh_bot` nodes — concatenates them (2 × 64 = **128-dim**), and a 2-layer MLP maps that to the load's `log10(droop)`. So droop at a load is predicted from that 128-dim endpoint context, one value per load edge.
+- **Generative head (planned, not built).** The longer-term plan ([docs/GOAL.md](docs/GOAL.md)) is to add a VAE / autoregressive decoder on top of this encoder — including a hierarchical latent split (`[z_topology | z_RLC | z_loads]`, mirroring Z-GED's `[z_topology | z_values | z_pz]`) — so the model can *generate* designs, not just score them. None of that is implemented yet; today only the encoder + supervised droop head exist.
 
 ## Graph representation
 
