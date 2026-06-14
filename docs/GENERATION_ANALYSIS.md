@@ -94,7 +94,7 @@ is achievable (§4).
 
 ---
 
-## 3. Five signals that the generation is physically correct
+## 3. Signals that the generation is physically correct
 
 ### 3.1 Surrogate fidelity *at the optimum* — and the safe-error story
 
@@ -153,6 +153,47 @@ At 0.10 mV with only 3 pads, the optimizer drives wire width to the ceiling
 so (✗). It does not invent a design or silently return an over-budget grid.
 That budget is genuinely unachievable for a sparse grid within the knob ranges.
 (The n_top = 4 case at the same budget is a *different* story — §4.)
+
+### 3.6 Watching it choose — the descent, the convergence, and the atlas
+
+The signals above are summary statistics; these three figures show the design
+*being chosen*.
+
+**The descent over the droop landscape.** Each panel is the predicted-droop
+contour map over the `(wire_width, C_decap)` design space for the OOD topology,
+with the spec boundary in cyan and the optimizer's path from start (○) to the
+chosen design (★):
+
+![Design-choice trajectory](figures/fig_design_trajectory.png)
+
+- At **0.20 mV** the star lands exactly *on* the cyan spec boundary — the
+  cheapest feasible point — and you can even see the boundary's non-monotonic
+  "elbow" on the fat-wire side (the §4 pathology, visible here as the cyan line
+  curling back up).
+- At **0.15** and **0.10 mV** the budget is (for the surrogate) unreachable on
+  this topology: the path climbs toward more copper/cap but stalls at the
+  surrogate's interior minimum, never touching the boundary — the visual
+  signature of the infeasible-budget case (genuinely infeasible at 0.15, and the
+  false rejection at 0.10 dissected in §4).
+
+**The convergence trace.** The same run as a time series — knobs, predicted
+droop, and loss vs optimization step:
+
+![Design-choice convergence](figures/fig_design_convergence.png)
+
+It makes the loss's two-phase behavior literal: predicted droop drops straight
+to the budget line and **sits on it**, while `C_decap` and `wire_width` keep
+adjusting to trade cost — exactly "meet the spec, then minimize metal."
+
+**The design atlas.** Every chosen design (3 budgets × 3 topologies) as a point
+in design space:
+
+![Design atlas](figures/fig_design_atlas.png)
+
+The two physical trends are visible at a glance: along each topology's track,
+looser budget → less copper *and* less cap (toward the lower-left); and the
+supply-rich `n_top = 7` track sits far below the sparse `n_top = 3` track
+(fewer pads → more metal for the same budget).
 
 ---
 

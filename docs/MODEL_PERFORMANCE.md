@@ -21,6 +21,7 @@ python3.12 scripts/plot_generation.py            # inverse-design figures
 python3.12 scripts/plot_surrogate_vs_sim.py      # surrogate-vs-simulator sweeps
 python3.12 scripts/plot_designspace_pred_vs_sim.py  # 2-D + capacitance sweeps
 python3.12 scripts/plot_single_chip.py           # per-chip spatial droop map
+python3.12 scripts/plot_design_choice.py         # design trajectory / convergence / atlas
 ```
 
 ---
@@ -83,7 +84,18 @@ conservative). A companion [capacitance sweep](figures/fig_cap_sweep_pred_vs_sim
 shows the distortion is **wire-axis-specific** — along decap the OOD surrogate
 is monotonic and only mildly conservative. → §4.1 of the generation analysis.
 
-## 7. Surrogate fidelity at the design optimum
+## 7. The design the optimizer chooses — descent over the droop landscape
+
+![Design-choice trajectory](figures/fig_design_trajectory.png)
+
+For each droop budget, the gradient-descent path through `(wire_width, C_decap)`
+space over the predicted-droop contours, with the spec boundary in cyan and the
+chosen design as ★. It lands exactly on the cheapest feasible point when the
+budget is reachable, and stalls above the boundary when it isn't. Companion
+[convergence trace](figures/fig_design_convergence.png) and
+[design atlas](figures/fig_design_atlas.png). → §3.6 of the generation analysis.
+
+## 8. Surrogate fidelity at the design optimum
 
 ![Surrogate fidelity at optimum](figures/fig_surrogate_fidelity.png)
 
