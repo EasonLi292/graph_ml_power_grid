@@ -195,6 +195,30 @@ looser budget → less copper *and* less cap (toward the lower-left); and the
 supply-rich `n_top = 7` track sits far below the sparse `n_top = 3` track
 (fewer pads → more metal for the same budget).
 
+### 3.7 Backprop is near-exact in-distribution (n_top 3 & 7)
+
+To isolate the *optimizer* from surrogate error, sweep many droop targets on the
+two **training** topologies (where the surrogate is near-exact) and ask: does the
+recovered design's *real* droop equal what we asked for?
+
+![In-distribution backprop recovery](figures/fig_backprop_indist.png)
+
+A 3-way agreement holds across the whole achievable range —
+**target ≈ surrogate prediction ≈ simulator**, all on the `y = x` line:
+
+| topology | \|simulated − target\| MAE | \|surrogate − simulator\| MAE |
+|---|---|---|
+| **n_top = 3** | 0.0035 mV (3.5 µV) | 0.0004 mV |
+| **n_top = 7** | 0.0010 mV (1.0 µV) | 0.0001 mV |
+
+So in-distribution the design loop does exactly its job: it lands a design whose
+**true** droop matches the spec to a few µV, optimizing through a surrogate that
+agrees with the simulator to sub-µV. (A handful of points sit a hair *under*
+budget where `C_decap` is pinned at its floor and only `wire_width` is left to
+move — a flat cost-gradient at a knob limit, not an optimizer failure.) This is
+the clean baseline against which the OOD failure in §4 stands out. Reproduce
+with `python3.12 scripts/check_backprop_indist.py`.
+
 ---
 
 ## 4. The one failure — surrogate non-monotonicity → a false rejection
