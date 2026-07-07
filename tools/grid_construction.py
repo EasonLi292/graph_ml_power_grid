@@ -56,22 +56,34 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
-# Bot column pattern is fixed across the dataset: V V G G V V V for
-# n_bot=7. The "3-cluster" choice (Vdd{0,1}, Vss{2,3}, Vdd{4,5,6}) gives
-# 2 cross-net boundaries while keeping every cluster reachable from the
-# via tap-sets at n_top ∈ {3, 4, 7}::
+# Bot column pattern per die size (1 = Vdd, 0 = Vss). One fixed pattern
+# per ``n_bot``, so topology within a die size varies only through
+# ``n_top`` (top track density).
 #
-#   n_top=7 (step=1)  taps  {0,1,2,3,4,5,6}  → every cluster ✓
-#   n_top=4 (step=2)  taps  {0, 2, 4, 6}     → every cluster ✓
-#   n_top=3 (step=3)  taps  {0, 3, 6}        → every cluster ✓
+# * ``n_bot=7`` — V V G G V V V. The "3-cluster" choice (Vdd{0,1},
+#   Vss{2,3}, Vdd{4,5,6}) gives 2 cross-net boundaries per row (14 loads)
+#   while keeping every cluster reachable from the via tap-sets at
+#   n_top ∈ {3, 4, 7}::
 #
-# n_top=2 (step=6) is *not* supported by this pattern (taps only {0, 6},
-# both Vdd, so the Vss cluster {2,3} would float). The single-boundary
-# pattern V V V V G G G covers n_top=2 too but at the cost of half the
-# load sites and (empirically) worse generalization — the n_top=2 graph
-# is geometrically too far from n_top=4 to anchor it.
-# 1 = Vdd, 0 = Vss.
-BOT_COL_PATTERN: tuple[int, ...] = (1, 1, 0, 0, 1, 1, 1)
+#     n_top=7 (step=1)  taps  {0,1,2,3,4,5,6}  → every cluster ✓
+#     n_top=4 (step=2)  taps  {0, 2, 4, 6}     → every cluster ✓
+#     n_top=3 (step=3)  taps  {0, 3, 6}        → every cluster ✓
+#
+#   n_top=2 (step=6) is *not* supported (taps {0, 6} are both Vdd, so
+#   the Vss cluster {2,3} would float).
+#
+# * ``n_bot=13`` — the 7-pattern tiled: V V G G V V V V G G V V V
+#   (5 clusters, 4 cross-net boundaries per row → 52 loads). Valid
+#   n_top: {5, 7, 13} — verified every cluster is tapped. n_top=4
+#   (step=4, taps {0,4,8,12}) misses Vss cluster {2,3} → floating DC
+#   island; n_top ∈ {2, 3} tap only Vdd. ``_top_col_pattern`` raises on
+#   those rather than silently building a singular grid.
+BOT_COL_PATTERNS: dict[int, tuple[int, ...]] = {
+    7:  (1, 1, 0, 0, 1, 1, 1),
+    13: (1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1),
+}
+# Back-compat alias (the original single-die-size constant).
+BOT_COL_PATTERN: tuple[int, ...] = BOT_COL_PATTERNS[7]
 
 # Stride-1, offset-0 on both: every row carries one load and one decap
 # at the single Vdd↔Vss boundary. 1 boundary × 7 rows = 7 of each.
@@ -139,6 +151,14 @@ class PDNGraph:
     top_pos: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
     bot_pos: np.ndarray = field(default_factory=lambda: np.empty((0, 2)))
 
+    # Optional PER-EDGE strap resistances (heterogeneous wire width). When
+    # set, these override the scalar ``R_top`` / ``R_bot`` everywhere R is
+    # consumed (solver stamps, GNN edge_attr). Index-aligned with
+    # ``top_edges`` / ``bot_edges`` (one R per *physical* edge, before the
+    # bidirectional packing in ``to_hetero_data``). ``None`` ⇒ uniform R.
+    R_top_edges: np.ndarray | None = None
+    R_bot_edges: np.ndarray | None = None
+
     @property
     def n_top_nodes(self) -> int:
         return self.n_top * self.n_top
@@ -158,25 +178,43 @@ class PDNGraph:
 
 def _bot_col_pattern(n_bot: int) -> np.ndarray:
     """Return the fixed Vdd/Vss column pattern for the bot mesh."""
-    if n_bot != 7:
+    if n_bot not in BOT_COL_PATTERNS:
         raise ValueError(
-            f"BOT_COL_PATTERN is hard-coded for n_bot=7; got {n_bot}. "
-            f"Extend BOT_COL_PATTERN if you change n_bot."
+            f"no bot column pattern defined for n_bot={n_bot}; "
+            f"supported: {sorted(BOT_COL_PATTERNS)}. Extend BOT_COL_PATTERNS "
+            f"if you add a die size."
         )
-    return np.asarray(BOT_COL_PATTERN, dtype=np.int8)
+    return np.asarray(BOT_COL_PATTERNS[n_bot], dtype=np.int8)
 
 
 def _top_col_pattern(n_top: int, n_bot: int, bot_pat: np.ndarray) -> np.ndarray:
     """Sample the bot column pattern at the via step to get top pattern.
 
     Same-net via alignment is automatic: top col c shares net with bot col
-    ``c * step``.
+    ``c * step``. Raises if any same-net column *cluster* of the bot
+    pattern has no via tap — an untapped cluster has no DC path to any
+    pad (its only connections are cross-net load/decap branches), which
+    makes the operating-point solve singular.
     """
     if n_top > 1 and (n_bot - 1) % (n_top - 1) != 0:
         raise ValueError(
             f"(n_bot - 1) must be a multiple of (n_top - 1); got n_top={n_top}, n_bot={n_bot}"
         )
     step = (n_bot - 1) // max(n_top - 1, 1)
+    taps = {c * step for c in range(n_top)}
+    start = 0
+    for i in range(1, n_bot + 1):
+        if i == n_bot or bot_pat[i] != bot_pat[start]:
+            cluster = set(range(start, i))
+            if not cluster & taps:
+                raise ValueError(
+                    f"n_top={n_top} on n_bot={n_bot}: via taps {sorted(taps)} miss "
+                    f"the {'Vdd' if bot_pat[start] else 'Vss'} cluster cols "
+                    f"{sorted(cluster)} — that net segment would float (no DC "
+                    f"path to a pad). Pick an n_top whose tap-set covers every "
+                    f"cluster."
+                )
+            start = i
     return np.asarray([bot_pat[c * step] for c in range(n_top)], dtype=np.int8)
 
 
@@ -250,6 +288,8 @@ def build_regular_pdn(
     duty: float = 0.5,
     phase: float = 0.0,
     loads: np.ndarray | None = None,
+    ww_top_edges: np.ndarray | None = None,
+    ww_bot_edges: np.ndarray | None = None,
 ) -> PDNGraph:
     """Build the two-rail PDN graph.
 
@@ -261,6 +301,14 @@ def build_regular_pdn(
     ``loads`` is an optional ``[n_loads, 4]`` array of per-load
     ``(I_peak, freq, duty, phase)``; if omitted, the scalar defaults are
     broadcast to every load.
+
+    ``ww_top_edges`` / ``ww_bot_edges`` are optional per-edge wire widths
+    (heterogeneous metal). When given they must be index-aligned with the
+    layer's ``*_edges`` array; each strap edge then gets its own
+    ``R = Rsheet × pitch / width_edge``. The scalar ``wire_width`` still
+    sets the uniform fallback and the warmup-relevant ``R_bot`` is taken
+    at the *thinnest* bot edge (largest R, slowest τ) so labels never
+    under-warm.
     """
     if wire_width <= 0:
         raise ValueError(f"wire_width must be positive, got {wire_width}")
@@ -298,6 +346,31 @@ def build_regular_pdn(
     top_edges = _per_layer_edges(n_top, top_pat)
     bot_edges = _per_layer_edges(n_bot, bot_pat)
     via_pairs = _via_pairs(n_top, n_bot)
+
+    # Optional per-edge (heterogeneous) strap resistances.
+    R_top_edges = R_bot_edges = None
+    if ww_top_edges is not None:
+        ww_top_edges = np.asarray(ww_top_edges, dtype=float)
+        if ww_top_edges.shape[0] != top_edges.shape[0]:
+            raise ValueError(
+                f"ww_top_edges length {ww_top_edges.shape[0]} != "
+                f"#top_edges {top_edges.shape[0]}"
+            )
+        if np.any(ww_top_edges <= 0):
+            raise ValueError("ww_top_edges must be positive")
+        R_top_edges = Rsheet_top * (pitch_top / ww_top_edges)
+    if ww_bot_edges is not None:
+        ww_bot_edges = np.asarray(ww_bot_edges, dtype=float)
+        if ww_bot_edges.shape[0] != bot_edges.shape[0]:
+            raise ValueError(
+                f"ww_bot_edges length {ww_bot_edges.shape[0]} != "
+                f"#bot_edges {bot_edges.shape[0]}"
+            )
+        if np.any(ww_bot_edges <= 0):
+            raise ValueError("ww_bot_edges must be positive")
+        R_bot_edges = Rsheet_bot * (pitch_bot / ww_bot_edges)
+        # Conservative scalar R_bot (thinnest edge → slowest τ) for warmup.
+        R_bot = float(R_bot_edges.max())
 
     decap_pairs = _cross_net_pairs_on_bot(
         n_bot, bot_pat, DECAP_ROW_STRIDE, DECAP_ROW_OFFSET
@@ -344,6 +417,8 @@ def build_regular_pdn(
         load_pairs=load_pairs,
         top_pos=top_pos,
         bot_pos=bot_pos,
+        R_top_edges=R_top_edges,
+        R_bot_edges=R_bot_edges,
     )
 
 
@@ -429,16 +504,27 @@ def to_hetero_data(g: PDNGraph):
         u, v = pairs[:, 0], pairs[:, 1]
         return np.stack([np.concatenate([u, v]), np.concatenate([v, u])], axis=0)
 
+    def _strap_attr(n_dir_edges: int, R_scalar: float, R_edges: np.ndarray | None) -> np.ndarray:
+        """Edge-attr with R in col 0. Per-edge R (index-aligned with the
+        physical edges) is bidir-tiled to match ``_bidir`` packing; else
+        the scalar is broadcast."""
+        a = np.zeros((n_dir_edges, EDGE_ATTR_DIM), dtype=np.float32)
+        if R_edges is not None:
+            a[:, EDGE_ATTR_COLS.index("R")] = np.concatenate([R_edges, R_edges])
+        else:
+            a[:, EDGE_ATTR_COLS.index("R")] = R_scalar
+        return a
+
     # ----- strap edges (within-layer same-net, bidir packed) -----
     ei_top = _bidir(g.top_edges).astype(np.int64) if g.top_edges.size else np.empty((2, 0), dtype=np.int64)
     data["mesh_top", "strap", "mesh_top"].edge_index = torch.from_numpy(ei_top)
     data["mesh_top", "strap", "mesh_top"].edge_attr = torch.from_numpy(
-        _const_attr(ei_top.shape[1], R=g.R_top)
+        _strap_attr(ei_top.shape[1], g.R_top, g.R_top_edges)
     )
     ei_bot = _bidir(g.bot_edges).astype(np.int64) if g.bot_edges.size else np.empty((2, 0), dtype=np.int64)
     data["mesh_bot", "strap", "mesh_bot"].edge_index = torch.from_numpy(ei_bot)
     data["mesh_bot", "strap", "mesh_bot"].edge_attr = torch.from_numpy(
-        _const_attr(ei_bot.shape[1], R=g.R_bot)
+        _strap_attr(ei_bot.shape[1], g.R_bot, g.R_bot_edges)
     )
 
     # ----- via edges (top ↔ bot, two directed relations sharing 'via') -----

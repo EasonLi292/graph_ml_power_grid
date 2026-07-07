@@ -19,7 +19,7 @@ import torch.nn as nn
 
 from tools.grid_construction import build_regular_pdn
 from tools.sampler import (
-    ALL_N_TOP,
+    ALL_ANCHORS,
     DEFAULT_RANGES,
     ParamRanges,
     derived_R_ranges,
@@ -62,13 +62,16 @@ class InputNormalizer(nn.Module):
         for p in ranges.params:
             _register(p.name, p.lo, p.hi, p.scale)
 
-        # Derived per-segment R_top / R_bot. Pitch_top changes with
-        # n_top (coarser top mesh → longer segment), so the analytic
-        # range needs to span the union over every n_top this dataset
-        # emits. Pitch_bot is invariant (n_bot fixed).
+        # Derived per-segment R_top / R_bot. Pitch_top changes with the
+        # (n_top, n_bot) anchor (coarser top mesh → longer segment), so
+        # the analytic range needs to span the union over every anchor
+        # this dataset emits. Pitch_bot is 1.0 at every current anchor,
+        # and the max pitch_top is 3.0 for both die sizes — so these
+        # stats are numerically identical to the old single-die-size
+        # ones and old checkpoints stay compatible.
         pitch_tops, pitch_bots = [], []
-        for nt in ALL_N_TOP:
-            proto_nt = build_regular_pdn(n_top=int(nt))
+        for nt, nb in ALL_ANCHORS:
+            proto_nt = build_regular_pdn(n_top=int(nt), n_bot=int(nb))
             pitch_tops.append(proto_nt.pitch_top)
             pitch_bots.append(proto_nt.pitch_bot)
         agg: dict[str, list] = {}

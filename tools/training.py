@@ -56,20 +56,24 @@ def train_one_epoch(model, loader, opt, device, grad_clip: float = 1.0) -> float
 def evaluate(model, loader, device, target_space: str = "log") -> dict:
     """Compute aggregate + per-sample-worst-load metrics.
 
-    Per-sample reshape uses ``n_loads`` from the underlying dataset (e.g.
-    14 at our default ``n_bot=7``). All graphs in one loader carry the
-    same number of load sites by construction, so the flat
-    ``[total_loads]`` tensor reshapes cleanly to ``[batch, n_loads]``.
+    Load counts vary per graph (14 on the 7-die, 52 on the 13-die), so
+    the per-sample worst is computed by scatter-max over a per-load
+    graph-id vector (the batch assignment of each load edge's source
+    node) rather than a rectangular reshape.
     """
     model.eval()
-    n_loads = loader.dataset._n_loads
-    preds, targets = [], []
+    preds, targets, gids = [], [], []
+    n_graphs = 0
     for batch in loader:
         batch = batch.to(device)
         preds.append(model(batch).cpu())
         targets.append(batch["y"].cpu())
+        ei = batch["mesh_bot", "load", "mesh_bot"].edge_index
+        gids.append(batch["mesh_bot"].batch[ei[0]].cpu() + n_graphs)
+        n_graphs += batch.num_graphs
     pred = torch.cat(preds)
     target = torch.cat(targets)
+    gid = torch.cat(gids)
 
     train_space_loss = F.mse_loss(pred, target).item()
 
@@ -85,10 +89,13 @@ def evaluate(model, loader, device, target_space: str = "log") -> dict:
     ss_tot = (target_v - target_v.mean()).pow(2).sum().item()
     r2 = 1.0 - ss_res / max(ss_tot, 1e-30)
 
-    pred_per = pred_v.view(-1, n_loads)
-    target_per = target_v.view(-1, n_loads)
-    pred_worst = pred_per.max(dim=1).values
-    target_worst = target_per.max(dim=1).values
+    neg_inf = torch.full((n_graphs,), -torch.inf)
+    pred_worst = neg_inf.clone().scatter_reduce(
+        0, gid, pred_v, reduce="amax", include_self=True
+    )
+    target_worst = neg_inf.clone().scatter_reduce(
+        0, gid, target_v, reduce="amax", include_self=True
+    )
     worst_err = pred_worst - target_worst
     worst_mae_v = worst_err.abs().mean().item()
     worst_rel = worst_mae_v / target_worst.mean().clamp_min(LOG_FLOOR).item()

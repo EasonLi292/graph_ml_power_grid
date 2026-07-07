@@ -1,7 +1,14 @@
 from .dataset_runner import SimConfig, run_many, run_one
-from .grid_construction import BOT_COL_PATTERN, PDNGraph, build_regular_pdn, to_hetero_data
+from .grid_construction import (
+    BOT_COL_PATTERN,
+    BOT_COL_PATTERNS,
+    PDNGraph,
+    build_regular_pdn,
+    to_hetero_data,
+)
 from .pyg_dataset import RegularPDNDataset
 from .sampler import (
+    ALL_ANCHORS,
     ALL_N_TOP,
     DEFAULT_RANGES,
     FIXED_CONSTANTS,
@@ -15,12 +22,15 @@ from .sampler import (
     FIXED_RSHEET_TOP,
     GLOBAL_RANGES,
     OOD_N_TOP,
+    TEST_ANCHORS,
     TEST_N_TOP,
+    TRAIN_ANCHORS,
     TRAIN_N_TOP,
     Param,
     ParamRanges,
     axis_sweep,
     derived_R_ranges,
+    sample_anchor,
     sample_n_top,
 )
 from .training import TrainConfig, evaluate, make_loaders, train, train_one_epoch
@@ -29,6 +39,7 @@ from .transient_solver import simulate, solve_static_dc, square_wave
 __all__ = [
     "PDNGraph",
     "BOT_COL_PATTERN",
+    "BOT_COL_PATTERNS",
     "build_regular_pdn",
     "to_hetero_data",
     "simulate",
@@ -42,6 +53,10 @@ __all__ = [
     "TEST_N_TOP",
     "OOD_N_TOP",
     "ALL_N_TOP",
+    "TRAIN_ANCHORS",
+    "TEST_ANCHORS",
+    "ALL_ANCHORS",
+    "sample_anchor",
     "FIXED_CONSTANTS",
     "FIXED_N_BOT",
     "FIXED_RSHEET_TOP",

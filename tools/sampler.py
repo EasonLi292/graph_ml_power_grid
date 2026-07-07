@@ -171,17 +171,44 @@ GLOBAL_RANGES = ParamRanges(
 # Discrete supply-density knob
 # ---------------------------------------------------------------------------
 
-# Generalization-test split. Train + val see {3, 7}; test sees n_top=4,
-# which sits *between* the training topologies. This is an
-# interpolation test — the model has seen denser (n_top=7) and sparser
-# (n_top=3) topologies during training and must interpolate to the
-# bracketed value. Best generalization result so far (test R² ≈ 0.78).
-TRAIN_N_TOP: tuple[int, ...] = (3, 7)
-TEST_N_TOP:  tuple[int, ...] = (4,)
+# Generalization-test split over (n_top, n_bot) topology anchors — two
+# die sizes (n_bot ∈ {7, 13}), several top track densities each. The
+# held-out anchors probe two distinct generalization axes:
+#
+# * ``(4, 7)``  — density interpolation on the small die (bracketed by
+#   the trained (3,7) and (7,7)).
+# * ``(7, 13)`` — a die size × density combination never trained:
+#   n_top=7 was seen only on the small die, n_bot=13 was seen only at
+#   densities 5 and 13. Tests transfer across die size.
+#
+# Valid anchors are constrained by via alignment
+# ((n_bot−1) % (n_top−1) == 0) AND full cluster tap coverage — see
+# ``BOT_COL_PATTERNS`` in grid_construction. For n_bot=7 that means
+# {3,4,7}; for n_bot=13, {5,7,13}.
+TRAIN_ANCHORS: tuple[tuple[int, int], ...] = ((3, 7), (7, 7), (5, 13), (13, 13))
+TEST_ANCHORS:  tuple[tuple[int, int], ...] = ((4, 7), (7, 13))
+ALL_ANCHORS:   tuple[tuple[int, int], ...] = tuple(
+    sorted(set(TRAIN_ANCHORS) | set(TEST_ANCHORS))
+)
+
+# Legacy single-die-size aliases (the n_bot=7 subset). Kept for scripts
+# that predate the multi-die-size design space (design.py, sweeps on old
+# datasets); new code should iterate ALL_ANCHORS.
+TRAIN_N_TOP: tuple[int, ...] = tuple(nt for nt, nb in TRAIN_ANCHORS if nb == 7)
+TEST_N_TOP:  tuple[int, ...] = tuple(nt for nt, nb in TEST_ANCHORS if nb == 7)
 OOD_N_TOP:   tuple[int, ...] = ()
 ALL_N_TOP:   tuple[int, ...] = tuple(
     sorted(set(TRAIN_N_TOP) | set(TEST_N_TOP) | set(OOD_N_TOP))
 )
+
+
+def sample_anchor(
+    n: int, seed: int, choices: tuple[tuple[int, int], ...] = TRAIN_ANCHORS
+) -> np.ndarray:
+    """Uniform-discrete draw of (n_top, n_bot) anchors; returns [n, 2] int16."""
+    rng = np.random.default_rng(seed)
+    pool = np.asarray(choices, dtype=np.int16)
+    return pool[rng.integers(low=0, high=len(pool), size=n)]
 
 
 def sample_n_top(
@@ -191,6 +218,34 @@ def sample_n_top(
     rng = np.random.default_rng(seed)
     pool = np.asarray(choices, dtype=np.int16)
     return pool[rng.integers(low=0, high=len(pool), size=n)]
+
+
+def sample_edge_widths(
+    n_top: int,
+    rng: np.random.Generator,
+    n_bot: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Independent log-uniform per-strap-edge wire widths.
+
+    Each top / bot strap edge draws its own width from the same
+    ``wire_width`` band ``[lo, hi]`` used for the global knob, so per-edge
+    R stays inside the analytic ``InputNormalizer`` range (no clipping) and
+    is *decorrelated from topology* — the whole point of the per-edge
+    dataset. Returns ``(ww_top_edges[T], ww_bot_edges[B])`` index-aligned
+    with ``build_regular_pdn(n_top).top_edges`` / ``bot_edges``.
+    """
+    from .grid_construction import build_regular_pdn
+
+    if n_bot is None:
+        n_bot = FIXED_N_BOT
+    g = build_regular_pdn(n_top=int(n_top), n_bot=int(n_bot))
+    ww = GLOBAL_RANGES.by_name("wire_width")
+    lo, hi = np.log(ww.lo), np.log(ww.hi)
+    n_t = int(g.top_edges.shape[0])
+    n_b = int(g.bot_edges.shape[0])
+    wt = np.exp(rng.uniform(lo, hi, size=n_t))
+    wb = np.exp(rng.uniform(lo, hi, size=n_b))
+    return wt.astype(np.float64), wb.astype(np.float64)
 
 
 # ---------------------------------------------------------------------------
