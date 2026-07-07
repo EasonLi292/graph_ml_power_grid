@@ -30,7 +30,6 @@ the dataset runner subtracts the Vss-side from the Vdd-side at each
 load location to get the local supply-rail voltage.
 """
 from __future__ import annotations
-
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
@@ -60,10 +59,13 @@ def _stamp_resistors(g: PDNGraph, top0: int, bot0: int):
         cols.extend([a, b, b, a])
         vals.extend([gv, gv, -gv, -gv])
 
-    for u, v in g.top_edges:
-        stamp(top0 + int(u), top0 + int(v), 1.0 / g.R_top)
-    for u, v in g.bot_edges:
-        stamp(bot0 + int(u), bot0 + int(v), 1.0 / g.R_bot)
+    # Per-edge R when present (heterogeneous metal); else the scalar.
+    for i, (u, v) in enumerate(g.top_edges):
+        R = g.R_top_edges[i] if g.R_top_edges is not None else g.R_top
+        stamp(top0 + int(u), top0 + int(v), 1.0 / R)
+    for i, (u, v) in enumerate(g.bot_edges):
+        R = g.R_bot_edges[i] if g.R_bot_edges is not None else g.R_bot
+        stamp(bot0 + int(u), bot0 + int(v), 1.0 / R)
     for ti, bi in g.via_pairs:
         stamp(top0 + int(ti), bot0 + int(bi), 1.0 / g.R_via)
     return rows, cols, vals

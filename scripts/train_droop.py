@@ -37,6 +37,10 @@ def main() -> None:
     ap.add_argument("--target", choices=["log", "linear"], default="log")
     ap.add_argument("--hidden-dim", type=int, default=64)
     ap.add_argument("--n-layers", type=int, default=7)
+    ap.add_argument("--conv-type", choices=["admittance", "edgeconv", "edge_aware"],
+                    default="admittance",
+                    help="admittance = deterministic conductance gate (uniform-R model); "
+                         "edgeconv = gated EdgeConv for per-edge-R datasets.")
     ap.add_argument("--dropout", type=float, default=0.0)
     ap.add_argument("--drop-edge-p", type=float, default=0.0,
                     help="DropEdge rate on strap+decap relations (train only).")
@@ -64,6 +68,7 @@ def main() -> None:
         hidden_dim=args.hidden_dim,
         n_layers=args.n_layers,
         dropout=args.dropout,
+        conv_type=args.conv_type,
         drop_edge_p=args.drop_edge_p,
     )
     model = PDNDroopRegressor(enc_cfg, target_space=args.target).to(device)

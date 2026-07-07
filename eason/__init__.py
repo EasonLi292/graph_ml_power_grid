@@ -25,7 +25,7 @@ Submodule layout (small files, one job each):
                                 + residual), and ``PDNDroopRegressor``
                                 (encoder + per-``mesh_bot`` scalar head).
 """
-from .convs import AdmittanceConv, EdgeAwareConv
+from .convs import AdmittanceConv, EdgeAwareConv, EdgeConvGated, MonotoneGate
 from .encoder import EncoderConfig, PDNDroopRegressor, PDNEncoder
 from .normalizer import InputNormalizer
 from .schema import EDGE_ATTR_DIM_NORMALIZED, EDGE_TYPES, NODE_TYPES

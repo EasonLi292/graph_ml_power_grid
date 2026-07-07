@@ -99,9 +99,20 @@ class PDNEncoder(nn.Module):
     def _build_edge_attr_dict(self, data: HeteroData) -> dict:
         out = {}
         for et in EDGE_TYPES:
+            rel = et[1]
             raw = data[et].edge_attr  # [E, EDGE_ATTR_DIM]
             normed = self.normalizer.normalize_edge_attr(raw, et)  # [E, 7]
-            if self.cfg.conv_type == "admittance" and et[1] in self._CONDUCTANCE_RELS:
+            if self.cfg.conv_type == "edgeconv":
+                # Gated EdgeConv: pass the bare admittance scalar to the
+                # monotone gate on passive branches (R for strap/via, C for
+                # decap); project the waveform for the load source.
+                if rel in self._CONDUCTANCE_RELS:
+                    out[et] = normed[:, 0:1]        # z(log10 R)
+                elif rel == "decap":
+                    out[et] = normed[:, 1:2]        # z(log10 C)
+                else:                               # load
+                    out[et] = self.edge_proj[self._et_key(et)](normed)
+            elif self.cfg.conv_type == "admittance" and rel in self._CONDUCTANCE_RELS:
                 # Hand-coded conductance gate: pass the R column only.
                 out[et] = normed[:, 0:1]
             else:

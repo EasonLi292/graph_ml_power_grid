@@ -17,7 +17,95 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
+
+
+class MonotoneGate(nn.Module):
+    """Per-dimension positive gate, *monotone increasing* in a scalar input.
+
+    Built from non-negative weights (``softplus``-ed) and monotone
+    activations, so the composite map ``ℝ → ℝ_+^h`` is provably
+    non-decreasing in its 1-D input. Fed the branch **admittance** proxy
+    (``−z(R)`` for resistors, ``+z(C)`` for caps), it yields a richer,
+    per-latent-dimension, nonlinear modulation than a single scalar gate
+    while guaranteeing "more conductance → stronger coupling" — which keeps
+    ∂droop/∂R (and ∂droop/∂C) the right sign everywhere, including OOD.
+    """
+
+    def __init__(self, hidden_dim: int, width: int = 16) -> None:
+        super().__init__()
+        self.w1 = nn.Parameter(torch.randn(width, 1) * 0.3 - 1.0)
+        self.b1 = nn.Parameter(torch.zeros(width))
+        self.w2 = nn.Parameter(torch.randn(hidden_dim, width) * 0.3 - 1.0)
+        self.b2 = nn.Parameter(torch.zeros(hidden_dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # x: [E, 1]
+        h = F.relu(F.linear(x, F.softplus(self.w1), self.b1))      # [E, width]
+        return F.softplus(F.linear(h, F.softplus(self.w2), self.b2))  # [E, h]
+
+
+class EdgeConvGated(MessagePassing):
+    """EdgeConv-style message (Wang et al., 2019) with a physics gate.
+
+    Message uses the receiver's absolute state *and* the neighbor
+    difference — ``MLP([x_i ‖ x_j − x_i])`` — the asymmetric form from
+    DGCNN's EdgeConv (global structure from ``x_i``, local from
+    ``x_j − x_i``). The graph here is **fixed/physical** (no dynamic kNN
+    rewiring) and aggregation is **sum** (KCL: incident branch currents
+    superpose) — not EdgeConv's max.
+
+    Three kinds:
+
+    * ``kind="resistor"`` / ``"capacitor"`` — passive two-terminal
+      branch. ``msg = g(adm) ⊙ MLP([x_i ‖ x_j − x_i])`` with ``g`` a
+      :class:`MonotoneGate` on the branch admittance proxy (``−z(R)`` for
+      resistors, ``z(C)`` for caps).
+    * ``kind="source"`` — current source (load). Not a gated coupling: it
+      injects a forcing term, so ``msg = MLP([x_i ‖ x_j ‖ e_load])`` with
+      both endpoints and the waveform, *no* admittance gate.
+
+    Update is shared: ``upd_i = MLP([x_i ‖ agg_i])`` (residual + LayerNorm
+    applied by the encoder).
+    """
+
+    def __init__(self, hidden_dim: int, kind: str) -> None:
+        super().__init__(aggr="sum")
+        if kind not in ("resistor", "capacitor", "source"):
+            raise ValueError(f"unknown kind: {kind!r}")
+        h = hidden_dim
+        self.kind = kind
+        if kind == "source":
+            self.msg_mlp = nn.Sequential(
+                nn.Linear(3 * h, h), nn.ReLU(), nn.Linear(h, h)
+            )
+        else:
+            # core message on [x_i ‖ x_j − x_i]
+            self.delta_mlp = nn.Sequential(
+                nn.Linear(2 * h, h), nn.ReLU(), nn.Linear(h, h)
+            )
+            self.gate = MonotoneGate(h)
+            # +1 for resistor (gate input −z(R)), so larger conductance →
+            # larger gate; −1 unused but kept explicit per kind.
+            self.adm_sign = -1.0 if kind == "resistor" else +1.0
+        self.upd_mlp = nn.Sequential(
+            nn.Linear(2 * h, h), nn.ReLU(), nn.Linear(h, h)
+        )
+
+    def forward(self, x, edge_index, edge_attr):
+        if isinstance(x, torch.Tensor):
+            x = (x, x)
+        out = self.propagate(edge_index, x=x, edge_attr=edge_attr)
+        return self.upd_mlp(torch.cat([x[1], out], dim=-1))
+
+    def message(self, x_i, x_j, edge_attr):
+        if self.kind == "source":
+            return self.msg_mlp(torch.cat([x_i, x_j, edge_attr], dim=-1))
+        # edge_attr is [E, 1] — the z-scored log10(R) or log10(C).
+        # adm_sign flips R so the gate is increasing in conductance.
+        gate = self.gate(self.adm_sign * edge_attr)
+        core = self.delta_mlp(torch.cat([x_i, x_j - x_i], dim=-1))
+        return gate * core
 
 
 class EdgeAwareConv(MessagePassing):
@@ -156,5 +244,17 @@ def _make_conv(et: tuple[str, str, str], hidden_dim: int, conv_type: str) -> nn.
             return AdmittanceConv(hidden_dim, kind="admittance")
         if rel == "load":
             return AdmittanceConv(hidden_dim, kind="source")
+        raise ValueError(f"unknown relation: {rel!r}")
+    if conv_type == "edgeconv":
+        # Gated EdgeConv: monotone admittance gate on passive branches
+        # (resistor/via on conductance, decap on C), un-gated injection on
+        # load. Pairs with the per-edge-R datasets.
+        rel = et[1]
+        if rel in ("strap", "via"):
+            return EdgeConvGated(hidden_dim, kind="resistor")
+        if rel == "decap":
+            return EdgeConvGated(hidden_dim, kind="capacitor")
+        if rel == "load":
+            return EdgeConvGated(hidden_dim, kind="source")
         raise ValueError(f"unknown relation: {rel!r}")
     raise ValueError(f"unknown conv_type: {conv_type!r}")
