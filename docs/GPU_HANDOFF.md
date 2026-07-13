@@ -25,7 +25,7 @@ held-out grid: **pooled Spearman > 0.68, within-net > 0.44 (VDD) / 0.40
 ```bash
 # main run (~small model, full-graph steps; residual target on by default)
 python3.12 scripts/train_ibmpg_attn.py --holdout ibmpg2t \
-    --device cuda --epochs 60 --m-sketch 64 \
+    --device cuda --epochs 60 --m-sketch 128 \
     --ckpt checkpoints/ibmpg_attn.pt
 
 # ablation A: no attention benefit from geometry? (drop to m=8 crushes it)
@@ -35,9 +35,25 @@ python3.12 scripts/train_ibmpg_attn.py --holdout ibmpg2t \
 
 # ablation B: absolute target (is the residual trick doing the work?)
 python3.12 scripts/train_ibmpg_attn.py --holdout ibmpg2t \
-    --device cuda --epochs 60 --m-sketch 64 --no-residual \
+    --device cuda --epochs 60 --m-sketch 128 --no-residual \
     --ckpt checkpoints/ibmpg_attn_abs.pt
+
+# ablation C: pure attention, no local rounds (does near-field matter?)
+python3.12 scripts/train_ibmpg_attn.py --holdout ibmpg2t \
+    --device cuda --epochs 60 --m-sketch 128 --n-conv 0 \
+    --ckpt checkpoints/ibmpg_attn_noconv.pt
+
+# ablation D: sketch size (where do geometry returns flatten?)
+python3.12 scripts/train_ibmpg_attn.py --holdout ibmpg2t \
+    --device cuda --epochs 60 --m-sketch 64 \
+    --ckpt checkpoints/ibmpg_attn_m64.pt
 ```
+
+Measured sketch fidelity (median/p95 R_eff rel err vs exact pair-solves):
+pg1t 25k: m=64 6.8%/26%, m=128 4.6%/20% · pg2t 164k: m=64 10.6%/38%,
+m=128 4.9%/23% · **pg5t 1.01M: m=64 2.4%/27%, m=128 1.2%/12%** — error is
+governed by m, not N (each probe excites every edge; JL scaling is
+√(log N / m)). Sketch cost at 1M nodes: 15 s at m=128 (one-time, cached).
 
 Also worth rerunning the *patch* model at proper scale for the paper
 comparison (it was CPU-starved at 40 epochs, val still climbing):

@@ -74,7 +74,7 @@ def main() -> None:
     ap.add_argument("--hidden-dim", type=int, default=64)
     ap.add_argument("--n-conv", type=int, default=2)
     ap.add_argument("--heads", type=int, default=4)
-    ap.add_argument("--m-sketch", type=int, default=64)
+    ap.add_argument("--m-sketch", type=int, default=128)
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--no-residual", action="store_true")
