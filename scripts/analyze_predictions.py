@@ -65,7 +65,6 @@ def predict_split(model, split: str, batch_size: int = 64):
     sample_id.
     """
     ds = RegularPDNDataset(DATA_H5, split=split, target="log")
-    n_loads = ds._n_loads
 
     preds, trues, ntops, wws, cds, sites, sids = [], [], [], [], [], [], []
     buf, meta = [], []
@@ -80,6 +79,8 @@ def predict_split(model, split: str, batch_size: int = 64):
         pv = 10.0 ** out
         off = 0
         for (nt, ww, cd, sid, y_true) in meta:
+            # load count is per-sample (varies across anchors) = len(y_true).
+            n_loads = y_true.shape[0]
             chunk = pv[off:off + n_loads]
             tv = 10.0 ** y_true
             for s in range(n_loads):
