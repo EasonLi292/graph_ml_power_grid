@@ -1,5 +1,13 @@
 # GPU handoff — IBM fine-tune, stage 0 (attention diagnostic)
 
+> **SUPERSEDED (2026-07-23).** Stage 0 ran and no configuration beat the
+> baseline; the postmortem (`docs/STAGE1_PLAN.md`) traced it to missing
+> load-timing inputs, not the architecture. Stage-1 launch commands are at
+> the end of `docs/STAGE1_PLAN.md`. The dataset notes and memory
+> expectations below still apply, but `scripts/train_ibmpg_attn.py` is now
+> the stage-1 trainer (timing-QS floor, held-out val grid) — the commands
+> below no longer reproduce stage 0 as recorded.
+
 Everything below is built, smoke-tested on CPU, and ready to launch.
 Nothing has been trained beyond smoke tests.
 

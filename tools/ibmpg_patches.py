@@ -149,6 +149,16 @@ def load_graph(bench: str, graphs_dir: Path = GRAPHS_DIR) -> IBMGraph:
         "l_gnd":    pool_max(l_gnd_full) > 0,
         "v_dc":     pool_max(d["v_dc"]).astype(np.float32),
     }
+    # load-timing backfill (scripts/patch_ibmpg_timing.py): exact
+    # quasi-static timing peak + sparse binned load waveforms
+    if "tqs_peak" in d.files:
+        x_raw["tqs_peak"] = pool_max(d["tqs_peak"]).astype(np.float32)
+        wn = remap[d["wave_node"]]
+        uniq, inv = np.unique(wn, return_inverse=True)
+        agg = np.zeros((uniq.size, d["wave_bins"].shape[1]))
+        np.add.at(agg, inv, d["wave_bins"].astype(np.float64))  # currents add on merge
+        x_raw["wave_node"] = uniq.astype(np.int64)
+        x_raw["wave_bins"] = agg.astype(np.float32)
     return IBMGraph(
         bench=bench,
         x_raw=x_raw,
