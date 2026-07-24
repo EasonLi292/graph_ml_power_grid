@@ -1,0 +1,64 @@
+{
+  "ckpt": "checkpoints/droop_v7_edgeconv.pt",
+  "conv_type": "edgeconv",
+  "delta_ww": 0.25,
+  "results": [
+    {
+      "anchor": [
+        3,
+        7
+      ],
+      "n_ww_perturb": 54,
+      "n_ww_live": 48,
+      "ww_sign_acc": 0.7916666666666666,
+      "site_rank_spearman_mean": 0.7447540419676643,
+      "site_rank_spearman_per_design": [
+        0.7358101135190918,
+        0.6202270381836945,
+        0.8782249742002064
+      ],
+      "magnitude_ratio_median": 0.7881983068371139,
+      "decap_sign_acc": 1.0,
+      "n_decap_live": 6,
+      "autograd_linearity_medrelerr": 0.2416592965119756
+    },
+    {
+      "anchor": [
+        4,
+        7
+      ],
+      "n_ww_perturb": 54,
+      "n_ww_live": 34,
+      "ww_sign_acc": 0.8823529411764706,
+      "site_rank_spearman_mean": 0.7659412503020651,
+      "site_rank_spearman_per_design": [
+        0.5909094062209527,
+        0.7812177502579979,
+        0.9256965944272446
+      ],
+      "magnitude_ratio_median": 1.109142328456408,
+      "decap_sign_acc": 1.0,
+      "n_decap_live": 6,
+      "autograd_linearity_medrelerr": 0.13842007274422818
+    },
+    {
+      "anchor": [
+        7,
+        13
+      ],
+      "n_ww_perturb": 54,
+      "n_ww_live": 17,
+      "ww_sign_acc": 0.29411764705882354,
+      "site_rank_spearman_mean": 0.016712436247119395,
+      "site_rank_spearman_per_design": [
+        0.2073181544417414,
+        0.28557342879270375,
+        -0.44275427449308696
+      ],
+      "magnitude_ratio_median": 0.0,
+      "decap_sign_acc": 1.0,
+      "n_decap_live": 6,
+      "autograd_linearity_medrelerr": 0.0
+    }
+  ]
+}

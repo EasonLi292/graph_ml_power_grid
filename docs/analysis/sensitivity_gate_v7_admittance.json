@@ -1,0 +1,64 @@
+{
+  "ckpt": "checkpoints/droop_v7_admittance.pt",
+  "conv_type": "admittance",
+  "delta_ww": 0.25,
+  "results": [
+    {
+      "anchor": [
+        3,
+        7
+      ],
+      "n_ww_perturb": 54,
+      "n_ww_live": 48,
+      "ww_sign_acc": 0.8333333333333334,
+      "site_rank_spearman_mean": 0.8273133814929481,
+      "site_rank_spearman_per_design": [
+        0.7151702786377709,
+        0.8740970072239421,
+        0.8926728586171312
+      ],
+      "magnitude_ratio_median": 0.7967707761226439,
+      "decap_sign_acc": 1.0,
+      "n_decap_live": 6,
+      "autograd_linearity_medrelerr": 0.1929136473894802
+    },
+    {
+      "anchor": [
+        4,
+        7
+      ],
+      "n_ww_perturb": 54,
+      "n_ww_live": 34,
+      "ww_sign_acc": 0.5294117647058824,
+      "site_rank_spearman_mean": -0.04919160646714826,
+      "site_rank_spearman_per_design": [
+        -0.5933952528379773,
+        -0.37048503611971106,
+        0.8163054695562436
+      ],
+      "magnitude_ratio_median": 1.1103434829435543,
+      "decap_sign_acc": 1.0,
+      "n_decap_live": 6,
+      "autograd_linearity_medrelerr": 0.18026494366171952
+    },
+    {
+      "anchor": [
+        7,
+        13
+      ],
+      "n_ww_perturb": 54,
+      "n_ww_live": 17,
+      "ww_sign_acc": 0.47058823529411764,
+      "site_rank_spearman_mean": 0.2917463806862299,
+      "site_rank_spearman_per_design": [
+        0.2073181544417414,
+        0.14915064419263144,
+        0.5187703434243168
+      ],
+      "magnitude_ratio_median": 0.0137453007518797,
+      "decap_sign_acc": 1.0,
+      "n_decap_live": 6,
+      "autograd_linearity_medrelerr": 0.0
+    }
+  ]
+}

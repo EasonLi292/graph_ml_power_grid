@@ -1,0 +1,45 @@
+{
+  "ckpt": "checkpoints/droop_v6_peredge_edgeconv.pt",
+  "conv_type": "edgeconv",
+  "delta_ww": 0.25,
+  "results": [
+    {
+      "anchor": [
+        3,
+        7
+      ],
+      "n_ww_perturb": 54,
+      "n_ww_live": 48,
+      "ww_sign_acc": 0.8333333333333334,
+      "site_rank_spearman_mean": 0.8445132438940489,
+      "site_rank_spearman_per_design": [
+        0.9463364293085655,
+        0.7523219814241485,
+        0.8348813209494325
+      ],
+      "magnitude_ratio_median": 0.840375607899825,
+      "decap_sign_acc": 1.0,
+      "n_decap_live": 6,
+      "autograd_linearity_medrelerr": 0.1269385441239419
+    },
+    {
+      "anchor": [
+        4,
+        7
+      ],
+      "n_ww_perturb": 54,
+      "n_ww_live": 34,
+      "ww_sign_acc": 0.4411764705882353,
+      "site_rank_spearman_mean": -0.3374613003095975,
+      "site_rank_spearman_per_design": [
+        -0.5500515995872033,
+        -0.1847265221878225,
+        -0.2776057791537668
+      ],
+      "magnitude_ratio_median": 0.9198987326384958,
+      "decap_sign_acc": 1.0,
+      "n_decap_live": 6,
+      "autograd_linearity_medrelerr": 0.19537832470562153
+    }
+  ]
+}
