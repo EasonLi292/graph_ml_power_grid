@@ -53,6 +53,12 @@ def main() -> None:
                     help="cpu | cuda | mps | auto")
     ap.add_argument("--ckpt", type=Path, default=Path("checkpoints/droop_regressor.pt"))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--jac-file", type=Path, default=None,
+                    help="jacobians.h5 from scripts/gen_jacobian_labels.py; "
+                         "must cover the FULL train split (batches with any "
+                         "unlabeled sample skip the Sobolev term).")
+    ap.add_argument("--sobolev-lambda", type=float, default=0.0,
+                    help="weight of the gradient-matching (Sobolev) loss term")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -61,7 +67,8 @@ def main() -> None:
     print(f"device: {device}, target_space: {args.target}")
 
     train_loader, val_loader, test_loader = make_loaders(
-        args.data, args.target, args.batch_size, args.num_workers
+        args.data, args.target, args.batch_size, args.num_workers,
+        jac_path=args.jac_file,
     )
 
     enc_cfg = EncoderConfig(
@@ -81,7 +88,8 @@ def main() -> None:
         batch_size=args.batch_size,
     )
     best, history = train(
-        model, train_loader, val_loader, cfg, device, args.target, ckpt_path=args.ckpt
+        model, train_loader, val_loader, cfg, device, args.target,
+        ckpt_path=args.ckpt, sobolev_lambda=args.sobolev_lambda,
     )
 
     # Reload best weights for the test report. test_loader holds the

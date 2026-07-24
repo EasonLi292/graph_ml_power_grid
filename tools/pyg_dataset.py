@@ -71,11 +71,26 @@ class RegularPDNDataset:
         split: str = "train",
         target: Target = "linear",
         droop_kind: DroopKind = "peak",
+        jac_path: str | Path | None = None,
     ) -> None:
         self.h5_path = Path(h5_path)
         self.split = split
         self.target = target
         self.droop_kind = droop_kind
+
+        # Optional exact-Jacobian labels (scripts/gen_jacobian_labels.py)
+        # for Sobolev training: ∂(worst droop)/∂(ln ww_e), ∂/∂(ln C_site).
+        self._jac = None
+        if jac_path is not None:
+            with h5py.File(jac_path, "r") as jf:
+                if split in jf and "done" in jf[split]:
+                    g = jf[split]
+                    self._jac = {
+                        "top": g["jac_lnww_top"][:],
+                        "bot": g["jac_lnww_bot"][:],
+                        "dec": g["jac_lnC"][:],
+                        "done": g["done"][:],
+                    }
 
         with h5py.File(self.h5_path, "r") as f:
             grp = self._resolve_group(f, split)
@@ -194,5 +209,25 @@ class RegularPDNDataset:
         else:
             y = droop
         data["y"] = torch.from_numpy(y.astype(np.float32))
+
+        # Sobolev labels: per-physical-edge Jacobians + segment sizes so the
+        # loss can fold the batched bidir edge rows back to physical edges.
+        if self._jac is not None and bool(self._jac["done"][idx]):
+            n_t, n_b = self._n_strap_by_anchor[anchor]
+            n_d = data["mesh_bot", "decap", "mesh_bot"].edge_index.size(1) // 2
+            data["jac_top"] = torch.from_numpy(
+                self._jac["top"][idx, :n_t].astype(np.float32))
+            data["jac_bot"] = torch.from_numpy(
+                self._jac["bot"][idx, :n_b].astype(np.float32))
+            data["jac_dec"] = torch.from_numpy(
+                self._jac["dec"][idx, :n_d].astype(np.float32))
+            data["jac_seg"] = torch.tensor([n_t, n_b, n_d], dtype=torch.long)
+            data["has_jac"] = torch.tensor([True])
+        else:
+            data["jac_top"] = torch.zeros(0)
+            data["jac_bot"] = torch.zeros(0)
+            data["jac_dec"] = torch.zeros(0)
+            data["jac_seg"] = torch.zeros(3, dtype=torch.long)
+            data["has_jac"] = torch.tensor([False])
 
         return data

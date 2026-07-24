@@ -32,15 +32,84 @@ def _to_linear_volts(t: torch.Tensor, target_space: str) -> torch.Tensor:
     return t.clamp_min(0.0)
 
 
-def train_one_epoch(model, loader, opt, device, grad_clip: float = 1.0) -> float:
+def _fold_bidir(grad_rows: torch.Tensor, vals: torch.Tensor, segs: torch.Tensor):
+    """Fold per-directed-edge grads back to physical edges.
+
+    Rows are packed per graph as ``[e_0..e_{S-1}, e_0..e_{S-1}]`` (bidir
+    tiling), graphs concatenated. ``segs`` holds each graph's physical
+    edge count S. Returns (grad_phys, val_phys) concatenated over graphs.
+    """
+    gs, vs = [], []
+    off = 0
+    for s in segs.tolist():
+        block_g = grad_rows[off:off + 2 * s]
+        block_v = vals[off:off + 2 * s]
+        gs.append(block_g[:s] + block_g[s:])
+        vs.append(block_v[:s])          # both halves carry the same value
+        off += 2 * s
+    return torch.cat(gs), torch.cat(vs)
+
+
+def sobolev_loss(batch, pred) -> torch.Tensor:
+    """Gradient-matching term: model's ∂(worst droop)/∂(ln knob) vs the
+    exact adjoint labels, in per-graph relative-sensitivity units.
+
+    ∂/∂ln ww_e = −R_e · ∂/∂R_e (R = Rsheet·pitch/ww);
+    ∂/∂ln C_site = C · ∂/∂C_site. Uses ``torch.autograd.grad`` with
+    ``create_graph=True`` (double backward) so the term trains the model.
+    ``pred`` must come from a forward pass made AFTER enabling
+    ``requires_grad`` on the strap/decap edge_attr tensors, and assumes
+    log-space targets (the project default).
+    """
+    from .grid_construction import EDGE_ATTR_COLS
+    R_COL = EDGE_ATTR_COLS.index("R")
+    C_COL = EDGE_ATTR_COLS.index("C")
+    et_top = ("mesh_top", "strap", "mesh_top")
+    et_bot = ("mesh_bot", "strap", "mesh_bot")
+    et_dec = ("mesh_bot", "decap", "mesh_bot")
+    attrs = [batch[et].edge_attr for et in (et_top, et_bot, et_dec)]
+
+    pred_v = torch.pow(10.0, pred)
+    gid = batch["mesh_bot"].batch[batch["mesh_bot", "load", "mesh_bot"].edge_index[0]]
+    n_graphs = int(batch.num_graphs)
+    neg_inf = torch.full((n_graphs,), -torch.inf, device=pred_v.device)
+    worst = neg_inf.scatter_reduce(0, gid, pred_v, reduce="amax", include_self=True)
+    grads = torch.autograd.grad(worst.sum(), attrs, create_graph=True)
+
+    segs = batch["jac_seg"].view(-1, 3)
+    droop_true = neg_inf.scatter_reduce(
+        0, gid, torch.pow(10.0, batch["y"]), reduce="amax", include_self=True)
+    terms = []
+    for i, (grad, attr, col, sign, lbl_key) in enumerate((
+        (grads[0], attrs[0], R_COL, -1.0, "jac_top"),
+        (grads[1], attrs[1], R_COL, -1.0, "jac_bot"),
+        (grads[2], attrs[2], C_COL, +1.0, "jac_dec"),
+    )):
+        g_phys, v_phys = _fold_bidir(grad[:, col], attr[:, col].detach(), segs[:, i])
+        model_jac = sign * v_phys * g_phys          # ∂(worst)/∂(ln knob)
+        scale = torch.repeat_interleave(droop_true, segs[:, i])
+        terms.append(F.mse_loss(model_jac / scale, batch[lbl_key] / scale))
+    return sum(terms) / len(terms)
+
+
+def train_one_epoch(model, loader, opt, device, grad_clip: float = 1.0,
+                    sobolev_lambda: float = 0.0) -> float:
     model.train()
     total = 0.0
     n = 0
     for batch in loader:
         batch = batch.to(device)
+        use_sob = sobolev_lambda > 0 and bool(batch["has_jac"].all())
+        if use_sob:
+            for et in (("mesh_top", "strap", "mesh_top"),
+                       ("mesh_bot", "strap", "mesh_bot"),
+                       ("mesh_bot", "decap", "mesh_bot")):
+                batch[et].edge_attr.requires_grad_(True)
         pred = model(batch)
         target = batch["y"]
         loss = F.mse_loss(pred, target)
+        if use_sob:
+            loss = loss + sobolev_lambda * sobolev_loss(batch, pred)
         opt.zero_grad()
         loss.backward()
         if grad_clip:
@@ -111,10 +180,12 @@ def evaluate(model, loader, device, target_space: str = "log") -> dict:
     }
 
 
-def make_loaders(h5_path, target_space: str, batch_size: int, num_workers: int = 0):
+def make_loaders(h5_path, target_space: str, batch_size: int, num_workers: int = 0,
+                 jac_path=None):
     from .pyg_dataset import RegularPDNDataset
 
-    train = RegularPDNDataset(h5_path, split="train", target=target_space)
+    train = RegularPDNDataset(h5_path, split="train", target=target_space,
+                              jac_path=jac_path)
     val = RegularPDNDataset(h5_path, split="val", target=target_space)
     test = RegularPDNDataset(h5_path, split="test", target=target_space)
     common = {"batch_size": batch_size, "num_workers": num_workers}
@@ -125,7 +196,8 @@ def make_loaders(h5_path, target_space: str, batch_size: int, num_workers: int =
     )
 
 
-def train(model, train_loader, val_loader, cfg: TrainConfig, device, target_space: str, ckpt_path=None):
+def train(model, train_loader, val_loader, cfg: TrainConfig, device, target_space: str,
+          ckpt_path=None, sobolev_lambda: float = 0.0):
     opt = Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     sched = CosineAnnealingLR(opt, T_max=cfg.n_epochs)
 
@@ -133,7 +205,8 @@ def train(model, train_loader, val_loader, cfg: TrainConfig, device, target_spac
     history = []
 
     for epoch in range(1, cfg.n_epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, opt, device, cfg.grad_clip)
+        train_loss = train_one_epoch(model, train_loader, opt, device, cfg.grad_clip,
+                                     sobolev_lambda=sobolev_lambda)
         val_metrics = evaluate(model, val_loader, device, target_space)
         sched.step()
 
