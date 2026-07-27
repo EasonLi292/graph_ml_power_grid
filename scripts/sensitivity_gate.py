@@ -18,6 +18,20 @@ own finite difference (is one backward pass a valid proposer?).
 
 Pass bar (per anchor): sign ≥ 95 %, mean site-ranking Spearman ≥ 0.8.
 
+STATISTICAL POWER (measured 2026-07-27, docs/SOBOLEV_RESULTS_REVIEW.md):
+designs are the unit of variance, not perturbations — edges within one
+design are strongly correlated, so per-edge binomial/Fisher tests
+overstate significance badly. Re-sampling designs for a *fixed*
+checkpoint gives these spreads over 6 seeds:
+
+    n_designs=3   (7,13): sign spread 0.49, ρ spread 0.58   <- unusable
+    n_designs=12  (7,13): sign spread 0.20, ρ spread 0.40
+
+Hence the default is 12, and every number is reported with a CI
+(Wilson for sign, design-bootstrap for ρ). Treat any difference smaller
+than the reported interval as noise, and compare checkpoints only at
+equal --n-designs/--seed.
+
     python scripts/sensitivity_gate.py --ckpt checkpoints/droop_v7_edgeconv.pt \\
         --conv-type edgeconv --out docs/analysis/sensitivity_gate_edgeconv.json
 """
@@ -59,6 +73,28 @@ D_COL = EDGE_ATTR_COLS.index("duty")
 P_COL = EDGE_ATTR_COLS.index("phase")
 
 SIM_DELTA_FLOOR = 1e-4   # |sim Δ|/droop below this: excluded (solver noise)
+
+
+def _wilson(k: int, n: int, z: float = 1.96):
+    """Wilson score interval for a proportion (better than normal at k≈n)."""
+    if n == 0:
+        return (None, None)
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (float(max(0.0, c - h)), float(min(1.0, c + h)))
+
+
+def _boot_ci(vals, n_boot: int = 2000, seed: int = 0):
+    """Percentile bootstrap CI over DESIGNS (the true unit of variance)."""
+    v = np.asarray(vals, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size < 2:
+        return (float("nan"), float("nan"))
+    rng = np.random.default_rng(seed)
+    means = rng.choice(v, size=(n_boot, v.size), replace=True).mean(axis=1)
+    return (float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5)))
 
 
 def build_batch(g, ww_top, ww_bot, C_decap):
@@ -166,11 +202,16 @@ def gate_anchor(model, n_top, n_bot, n_designs, k_bot, k_top, delta_ww,
         ln = np.array([r["d_lin"] for r in sub])
         lin_errs.append(float(np.median(np.abs(ln - fd) / (np.abs(fd) + 1e-12))))
     ratios = [abs(r["d_model"]) / abs(r["d_sim"]) for r in live]
+    sign_lo, sign_hi = _wilson(int(np.sum(sign_ok)), len(sign_ok)) if sign_ok else (None, None)
+    rho_lo, rho_hi = _boot_ci(rhos)
     out = {
         "anchor": [n_top, n_bot],
+        "n_designs": n_designs,
         "n_ww_perturb": len(ww), "n_ww_live": len(live),
         "ww_sign_acc": float(np.mean(sign_ok)) if sign_ok else None,
+        "ww_sign_ci95": [sign_lo, sign_hi],
         "site_rank_spearman_mean": float(np.mean(rhos)),
+        "site_rank_spearman_ci95": [rho_lo, rho_hi],
         "site_rank_spearman_per_design": rhos,
         "magnitude_ratio_median": float(np.median(ratios)) if ratios else None,
         "decap_sign_acc": float(np.mean(dec_ok)) if dec_ok else None,
@@ -178,12 +219,18 @@ def gate_anchor(model, n_top, n_bot, n_designs, k_bot, k_top, delta_ww,
         "autograd_linearity_medrelerr": float(np.median(lin_errs)),
     }
     if verbose:
-        print(f"  ({n_top},{n_bot}): sign {out['ww_sign_acc']}, "
-              f"rank-rho {out['site_rank_spearman_mean']:.3f} "
-              f"(per-design {[f'{r:.2f}' for r in rhos]}), "
+        print(f"  ({n_top},{n_bot}): sign {out['ww_sign_acc']:.3f} "
+              f"[{sign_lo:.2f},{sign_hi:.2f}], "
+              f"rank-rho {out['site_rank_spearman_mean']:+.3f} "
+              f"[{rho_lo:+.2f},{rho_hi:+.2f}], "
               f"mag-ratio {out['magnitude_ratio_median']:.2f}, "
-              f"decap-sign {out['decap_sign_acc']}, "
-              f"lin-err {out['autograd_linearity_medrelerr']:.2%}")
+              f"decap-sign {out['decap_sign_acc']:.2f}, "
+              f"lin-err {out['autograd_linearity_medrelerr']:.1%}, "
+              f"live {len(live)}/{len(ww)}")
+        if len(live) < 30:
+            print(f"      ! only {len(live)} live perturbations — most single-edge "
+                  f"moves fall under the {SIM_DELTA_FLOOR:.0e} relative floor here; "
+                  f"raise --n-designs or --delta-ww before trusting this row")
     return out, rows
 
 
@@ -196,7 +243,10 @@ def main():
     ap.add_argument("--n-layers", type=int, default=7)
     ap.add_argument("--anchors", nargs="*", default=["3,7", "4,7", "7,13"],
                     help="train (3,7); OOD interp (4,7); OOD transfer (7,13)")
-    ap.add_argument("--n-designs", type=int, default=3)
+    ap.add_argument("--n-designs", type=int, default=12,
+                    help="designs per anchor — the unit of variance; 3 is "
+                         "unusable (rho spread 0.58 at (7,13)), 12 is the "
+                         "cheap default (~25 s for 3 anchors)")
     ap.add_argument("--k-bot", type=int, default=12, help="bot strap edges perturbed")
     ap.add_argument("--k-top", type=int, default=6, help="top strap edges perturbed")
     ap.add_argument("--delta-ww", type=float, default=0.25, help="width step (+25%%)")
@@ -225,20 +275,27 @@ def main():
                              args.k_top, args.delta_ww, rng)
         results.append(res)
 
-    print(f"\n{'anchor':>8} | {'sign':>6} | {'rank-rho':>8} | {'mag':>5} | "
-          f"{'decap':>6} | verdict")
+    print(f"\n{'anchor':>8} | {'sign (95% CI)':>20} | {'rank-rho (95% CI)':>24} | "
+          f"{'mag':>5} | verdict")
     for r in results:
-        ok = (r["ww_sign_acc"] or 0) >= 0.95 and r["site_rank_spearman_mean"] >= 0.8
-        print(f"  {tuple(r['anchor'])!s:>7} | {r['ww_sign_acc']:.2f} | "
-              f"{r['site_rank_spearman_mean']:>8.3f} | "
-              f"{r['magnitude_ratio_median']:>5.2f} | {r['decap_sign_acc']:.2f} | "
+        ok = ((r["ww_sign_ci95"][0] or 0) >= 0.95
+              and r["site_rank_spearman_ci95"][0] >= 0.8)
+        sl, sh = r["ww_sign_ci95"]
+        rl, rh = r["site_rank_spearman_ci95"]
+        print(f"  {tuple(r['anchor'])!s:>7} | {r['ww_sign_acc']:.2f} "
+              f"[{sl:.2f},{sh:.2f}] | {r['site_rank_spearman_mean']:+.3f} "
+              f"[{rl:+.2f},{rh:+.2f}] | {r['magnitude_ratio_median']:>5.2f} | "
               f"{'PASS' if ok else 'FAIL'}")
+    print("  (PASS requires the CI LOWER bound to clear the bar)")
     print(f"({time.time()-t0:.0f}s)")
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(
             {"ckpt": str(args.ckpt), "conv_type": args.conv_type,
-             "delta_ww": args.delta_ww, "results": results}, indent=2))
+             "hidden_dim": args.hidden_dim, "n_layers": args.n_layers,
+             "delta_ww": args.delta_ww, "n_designs": args.n_designs,
+             "k_bot": args.k_bot, "k_top": args.k_top, "seed": args.seed,
+             "results": results}, indent=2))
         print(f"→ {args.out}")
 
 
