@@ -258,12 +258,18 @@ def main() -> None:
     print(f"omegas (rad/s): {[f'{float(w):.3e}' for w in omegas]}")
 
     tr, te = load_split(args.data, "train"), load_split(args.data, "test")
+    va = load_split(args.data, "val")
     if args.limit:
         tr = {k: v[:args.limit] for k, v in tr.items()}
-    print(f"train {tr['n_top'].shape[0]} | test {te['n_top'].shape[0]}")
+        va = {k: v[:max(64, args.limit // 4)] for k, v in va.items()}
+    print(f"train {tr['n_top'].shape[0]} | val {va['n_top'].shape[0]} "
+          f"| test {te['n_top'].shape[0]}")
     print("precomputing factors (train)")
     f_tr = build_cache(tr, ac, omegas, args.m_factor, args.n_power,
                        f"train{args.limit or ''}", args.cache_dir)
+    print("precomputing factors (val)")
+    f_va = build_cache(va, ac, omegas, args.m_factor, args.n_power,
+                       f"val{args.limit or ''}", args.cache_dir)
     print("precomputing factors (test)")
     f_te = build_cache(te, ac, omegas, args.m_factor, args.n_power,
                        "test", args.cache_dir)
@@ -285,6 +291,7 @@ def main() -> None:
 
     n = tr["n_top"].shape[0]
     history = []
+    best_val, best_ep = -np.inf, -1
     for ep in range(1, args.epochs + 1):
         model.train()
         t0, losses = time.time(), []
@@ -303,25 +310,41 @@ def main() -> None:
             losses.append(loss.item())
         sched.step()
         rep = evaluate(model, te, f_te, ac, args.device)
+        # Selection runs on the VAL split (train anchors only — no test
+        # leakage). Held-out R2 oscillates by up to 0.5 at (7,13) between
+        # late epochs, so the last epoch is a noisy draw, not the model to
+        # ship or to gate.
+        vrep = evaluate(model, va, f_va, ac, args.device)
+        vscore = float(np.mean([v["worst_r2"] for v in vrep.values()]))
         history.append({"epoch": ep, "train_loss": float(np.mean(losses)),
-                        "test_per_anchor": rep})
+                        "test_per_anchor": rep, "val_per_anchor": vrep,
+                        "val_score": vscore})
         line = "  ".join(f"{k}:R2={v['worst_r2']:+.3f}" for k, v in rep.items())
         print(f"ep{ep:>3} loss {np.mean(losses):.4f} | {line} "
-              f"({time.time()-t0:.0f}s)")
+              f"| val {vscore:+.3f} ({time.time()-t0:.0f}s)")
         args.ckpt.parent.mkdir(parents=True, exist_ok=True)
         blob = {"model": model.state_dict(), "epoch": ep,
                 "cfg": vars(cfg), "args": {**vars(args),
                                            "ckpt": str(args.ckpt)}}
-        torch.save(blob, args.ckpt)
+        torch.save(blob, args.ckpt.with_suffix(".last.pt"))
+        if vscore > best_val:
+            best_val, best_ep = vscore, ep
+            torch.save(blob, args.ckpt)          # <-- the selected checkpoint
         if args.keep_epochs:
-            # held-out R2 peaks early and decays (all three ablations), so the
-            # last-epoch checkpoint is not the model the gate should judge.
-            # Keeping every epoch lets a checkpoint be selected after the fact.
             torch.save(blob, args.ckpt.with_suffix(f".ep{ep:03d}.pt"))
 
+    sel = next(h for h in history if h["epoch"] == best_ep)
+    print(f"\nselected epoch {best_ep} (val {best_val:+.3f}) -> {args.ckpt}")
+    print(f"  its test per-anchor: " + "  ".join(
+        f"{k}:R2={v['worst_r2']:+.3f}" for k, v in sel["test_per_anchor"].items()))
+    print(f"  last epoch for reference: " + "  ".join(
+        f"{k}:R2={v['worst_r2']:+.3f}" for k, v in history[-1]["test_per_anchor"].items()))
     hp = args.ckpt.with_suffix(".history.json")
     hp.write_text(json.dumps({"history": history,
-                              "test_per_anchor": history[-1]["test_per_anchor"]},
+                              "selected_epoch": best_ep,
+                              "selected_val_score": best_val,
+                              "test_per_anchor": sel["test_per_anchor"],
+                              "test_per_anchor_last": history[-1]["test_per_anchor"]},
                              indent=2))
     print(f"history -> {hp}")
 
