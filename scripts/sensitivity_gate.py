@@ -126,7 +126,40 @@ def build_batch(g, ww_top, ww_bot, C_decap):
     return Batch.from_data_list([data])
 
 
+class ImpedanceAdapter:
+    """Exposes the impedance-attention model through the gate's interface.
+
+    Rebuilds the impedance factors under autograd on every call — that is
+    the whole point of the gate, so factor caching is deliberately NOT used
+    here even though training uses it.
+    """
+
+    def __init__(self, model, omegas, m, n_power):
+        from tools.impedance_factors import branch_system, node_features
+        self.model, self.omegas, self.m, self.n_power = model, omegas, m, n_power
+        self._bs, self._nf = branch_system, node_features
+        self._cache = {}
+
+    def __call__(self, g, ww_top, ww_bot, C_decap):
+        from tools.impedance_factors import impedance_factors, knob_tensors
+        key = (g.n_top, g.n_bot)
+        if key not in self._cache:
+            s = self._bs(g)
+            self._cache[key] = (s, self._nf(s, torch.tensor(g.loads,
+                                                            dtype=torch.float64)))
+        s, x = self._cache[key]
+        cd = C_decap if torch.is_tensor(C_decap) else torch.tensor(
+            float(C_decap), dtype=torch.float64)
+        R, C = knob_tensors(g, ww_top.double(), ww_bot.double(), cd.double(),
+                            FIXED_RSHEET_TOP, FIXED_RSHEET_BOT, FIXED_R_VIA)
+        p, sf = impedance_factors(s, R, C, self.omegas, m=self.m,
+                                  n_power=self.n_power)
+        return (10.0 ** self.model(x, p, sf, s.n_elec)).max()
+
+
 def model_worst(model, g, ww_top, ww_bot, C_decap):
+    if isinstance(model, ImpedanceAdapter):
+        return model(g, ww_top, ww_bot, C_decap)
     return (10.0 ** model(build_batch(g, ww_top, ww_bot, C_decap))).max()
 
 
@@ -237,6 +270,9 @@ def gate_anchor(model, n_top, n_bot, n_designs, k_bot, k_top, delta_ww,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", type=Path, default=Path("checkpoints/droop_v7_edgeconv.pt"))
+    ap.add_argument("--arch", default="local", choices=["local", "impedance"],
+                    help="'local' = the depth-based GNN baselines; "
+                         "'impedance' = one-shot impedance attention")
     ap.add_argument("--conv-type", default="edgeconv",
                     choices=["admittance", "edgeconv", "edge_aware"])
     ap.add_argument("--hidden-dim", type=int, default=64)
@@ -254,14 +290,28 @@ def main():
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
-    model = PDNDroopRegressor(
-        EncoderConfig(hidden_dim=args.hidden_dim, n_layers=args.n_layers,
-                      conv_type=args.conv_type, drop_edge_p=0.0),
-        target_space="log")
     state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    model.load_state_dict(state["model"]); model.eval()
-    for p in model.parameters():
-        p.requires_grad = False
+    if args.arch == "impedance":
+        from eason.impedance_attention_model import (
+            ImpAttnConfig, ImpedanceAttentionRegressor)
+        from scripts.train_impedance_attention import default_omegas
+        cfg = ImpAttnConfig(**state["cfg"]) if "cfg" in state else ImpAttnConfig()
+        inner = ImpedanceAttentionRegressor(cfg).to(torch.float64)
+        inner.load_state_dict(state["model"]); inner.eval()
+        for p in inner.parameters():
+            p.requires_grad = False
+        sa = state.get("args", {})
+        model = ImpedanceAdapter(
+            inner, default_omegas(cfg.n_freq).double(),
+            cfg.m_factor, int(sa.get("n_power", 2)))
+    else:
+        model = PDNDroopRegressor(
+            EncoderConfig(hidden_dim=args.hidden_dim, n_layers=args.n_layers,
+                          conv_type=args.conv_type, drop_edge_p=0.0),
+            target_space="log")
+        model.load_state_dict(state["model"]); model.eval()
+        for p in model.parameters():
+            p.requires_grad = False
 
     rng = np.random.default_rng(args.seed)
     print(f"gate: {args.ckpt.name} ({args.conv_type}) | "
