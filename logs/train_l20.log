@@ -1,0 +1,75 @@
+device: cuda:1, target_space: log
+params: 3,190,657
+epoch   1  train_loss=0.0672  val_loss=0.0018  val_mae=0.025 mV  val_R²=0.9628  worst_mae=0.032 mV
+epoch   2  train_loss=0.0016  val_loss=0.0008  val_mae=0.017 mV  val_R²=0.9845  worst_mae=0.019 mV
+epoch   3  train_loss=0.0006  val_loss=0.0005  val_mae=0.012 mV  val_R²=0.9936  worst_mae=0.013 mV
+epoch   4  train_loss=0.0006  val_loss=0.0004  val_mae=0.011 mV  val_R²=0.9948  worst_mae=0.011 mV
+epoch   5  train_loss=0.0015  val_loss=0.0015  val_mae=0.020 mV  val_R²=0.9819  worst_mae=0.028 mV
+epoch   6  train_loss=0.0010  val_loss=0.0005  val_mae=0.013 mV  val_R²=0.9914  worst_mae=0.016 mV
+epoch   7  train_loss=0.0003  val_loss=0.0002  val_mae=0.009 mV  val_R²=0.9960  worst_mae=0.010 mV
+epoch   8  train_loss=0.0012  val_loss=0.0003  val_mae=0.010 mV  val_R²=0.9953  worst_mae=0.013 mV
+epoch   9  train_loss=0.0003  val_loss=0.0003  val_mae=0.010 mV  val_R²=0.9949  worst_mae=0.013 mV
+epoch  10  train_loss=0.0003  val_loss=0.0001  val_mae=0.007 mV  val_R²=0.9976  worst_mae=0.009 mV
+epoch  11  train_loss=0.0002  val_loss=0.0001  val_mae=0.007 mV  val_R²=0.9974  worst_mae=0.008 mV
+epoch  12  train_loss=0.0003  val_loss=0.0001  val_mae=0.006 mV  val_R²=0.9980  worst_mae=0.008 mV
+epoch  13  train_loss=0.0002  val_loss=0.0002  val_mae=0.010 mV  val_R²=0.9952  worst_mae=0.012 mV
+epoch  14  train_loss=0.0002  val_loss=0.0001  val_mae=0.006 mV  val_R²=0.9980  worst_mae=0.007 mV
+epoch  15  train_loss=0.0002  val_loss=0.0010  val_mae=0.021 mV  val_R²=0.9840  worst_mae=0.021 mV
+epoch  16  train_loss=0.0002  val_loss=0.0001  val_mae=0.007 mV  val_R²=0.9968  worst_mae=0.010 mV
+epoch  17  train_loss=0.0001  val_loss=0.0003  val_mae=0.012 mV  val_R²=0.9924  worst_mae=0.018 mV
+epoch  18  train_loss=0.0001  val_loss=0.0001  val_mae=0.005 mV  val_R²=0.9988  worst_mae=0.006 mV
+epoch  19  train_loss=0.0001  val_loss=0.0005  val_mae=0.017 mV  val_R²=0.9891  worst_mae=0.021 mV
+epoch  20  train_loss=0.0002  val_loss=0.0001  val_mae=0.007 mV  val_R²=0.9973  worst_mae=0.007 mV
+epoch  21  train_loss=0.0001  val_loss=0.0000  val_mae=0.004 mV  val_R²=0.9992  worst_mae=0.005 mV
+epoch  22  train_loss=0.0004  val_loss=0.0001  val_mae=0.005 mV  val_R²=0.9989  worst_mae=0.006 mV
+epoch  23  train_loss=0.0001  val_loss=0.0001  val_mae=0.007 mV  val_R²=0.9977  worst_mae=0.008 mV
+epoch  24  train_loss=0.0001  val_loss=0.0003  val_mae=0.012 mV  val_R²=0.9946  worst_mae=0.015 mV
+epoch  25  train_loss=0.0001  val_loss=0.0000  val_mae=0.005 mV  val_R²=0.9987  worst_mae=0.006 mV
+epoch  26  train_loss=0.0001  val_loss=0.0001  val_mae=0.006 mV  val_R²=0.9984  worst_mae=0.008 mV
+epoch  27  train_loss=0.0001  val_loss=0.0001  val_mae=0.005 mV  val_R²=0.9990  worst_mae=0.006 mV
+epoch  28  train_loss=0.0001  val_loss=0.0000  val_mae=0.004 mV  val_R²=0.9993  worst_mae=0.005 mV
+epoch  29  train_loss=0.0000  val_loss=0.0001  val_mae=0.005 mV  val_R²=0.9988  worst_mae=0.006 mV
+epoch  30  train_loss=0.0001  val_loss=0.0000  val_mae=0.003 mV  val_R²=0.9994  worst_mae=0.005 mV
+epoch  31  train_loss=0.0000  val_loss=0.0001  val_mae=0.006 mV  val_R²=0.9987  worst_mae=0.007 mV
+epoch  32  train_loss=0.0000  val_loss=0.0000  val_mae=0.003 mV  val_R²=0.9995  worst_mae=0.004 mV
+epoch  33  train_loss=0.0000  val_loss=0.0000  val_mae=0.003 mV  val_R²=0.9995  worst_mae=0.004 mV
+epoch  34  train_loss=0.0000  val_loss=0.0000  val_mae=0.004 mV  val_R²=0.9991  worst_mae=0.005 mV
+epoch  35  train_loss=0.0000  val_loss=0.0001  val_mae=0.005 mV  val_R²=0.9986  worst_mae=0.007 mV
+epoch  36  train_loss=0.0000  val_loss=0.0000  val_mae=0.003 mV  val_R²=0.9995  worst_mae=0.004 mV
+epoch  37  train_loss=0.0000  val_loss=0.0000  val_mae=0.004 mV  val_R²=0.9990  worst_mae=0.006 mV
+epoch  38  train_loss=0.0000  val_loss=0.0000  val_mae=0.003 mV  val_R²=0.9995  worst_mae=0.004 mV
+epoch  39  train_loss=0.0000  val_loss=0.0000  val_mae=0.003 mV  val_R²=0.9996  worst_mae=0.004 mV
+epoch  40  train_loss=0.0000  val_loss=0.0000  val_mae=0.003 mV  val_R²=0.9996  worst_mae=0.004 mV
+epoch  41  train_loss=0.0000  val_loss=0.0000  val_mae=0.002 mV  val_R²=0.9997  worst_mae=0.003 mV
+epoch  42  train_loss=0.0000  val_loss=0.0000  val_mae=0.003 mV  val_R²=0.9996  worst_mae=0.004 mV
+epoch  43  train_loss=0.0000  val_loss=0.0000  val_mae=0.002 mV  val_R²=0.9997  worst_mae=0.003 mV
+epoch  44  train_loss=0.0000  val_loss=0.0000  val_mae=0.002 mV  val_R²=0.9997  worst_mae=0.003 mV
+epoch  45  train_loss=0.0000  val_loss=0.0000  val_mae=0.002 mV  val_R²=0.9997  worst_mae=0.003 mV
+epoch  46  train_loss=0.0000  val_loss=0.0000  val_mae=0.002 mV  val_R²=0.9997  worst_mae=0.003 mV
+epoch  47  train_loss=0.0000  val_loss=0.0000  val_mae=0.002 mV  val_R²=0.9997  worst_mae=0.003 mV
+epoch  48  train_loss=0.0000  val_loss=0.0000  val_mae=0.002 mV  val_R²=0.9997  worst_mae=0.003 mV
+epoch  49  train_loss=0.0000  val_loss=0.0000  val_mae=0.002 mV  val_R²=0.9997  worst_mae=0.003 mV
+epoch  50  train_loss=0.0000  val_loss=0.0000  val_mae=0.002 mV  val_R²=0.9997  worst_mae=0.003 mV
+
+== best (val) ==
+{
+  "loss_train_space": 1.0999027836078312e-05,
+  "mae_mV": 0.0020720290194731206,
+  "rmse_mV": 0.003378348310434376,
+  "rel_mae": 0.006316382708636313,
+  "r2": 0.999733540469652,
+  "worst_mae_mV": 0.0030535079531546216,
+  "worst_rel_mae": 0.007662135916533789
+}
+
+== test (best ckpt; held-out n_top) ==
+{
+  "loss_train_space": 0.006962511222809553,
+  "mae_mV": 0.036421450204215944,
+  "rmse_mV": 0.04992973481421359,
+  "rel_mae": 0.09836534803510062,
+  "r2": 0.9312343112437951,
+  "worst_mae_mV": 0.058824658481171355,
+  "worst_rel_mae": 0.1287955812254621
+}
+history written to checkpoints/droop_v7_edgeconv_deep20_l0.history.json

@@ -1,0 +1,23 @@
+[train] sampling 16000 points (seed=42) over anchors=((3, 7), (7, 7), (5, 13), (13, 13)) [per-edge R]...
+[train] simulating on 64 workers...
+[train] done in 16.3s (1.0 ms/sample)
+[val] sampling 2000 points (seed=43) over anchors=((3, 7), (7, 7), (5, 13), (13, 13)) [per-edge R]...
+[val] simulating on 64 workers...
+[val] done in 2.9s (1.4 ms/sample)
+[test] sampling 2000 points (seed=44) over anchors=((4, 7), (7, 13)) [per-edge R]...
+[test] simulating on 64 workers...
+[test] done in 2.6s (1.3 ms/sample)
+[sweeps] 2 axes × 6 anchors × 50 points
+  sweep[wire_width|anchor=(3, 7)] 50pts in 1.1s
+  sweep[wire_width|anchor=(4, 7)] 50pts in 1.1s
+  sweep[wire_width|anchor=(5, 13)] 50pts in 1.2s
+  sweep[wire_width|anchor=(7, 7)] 50pts in 1.1s
+  sweep[wire_width|anchor=(7, 13)] 50pts in 1.3s
+  sweep[wire_width|anchor=(13, 13)] 50pts in 1.4s
+  sweep[C_decap|anchor=(3, 7)] 50pts in 1.1s
+  sweep[C_decap|anchor=(4, 7)] 50pts in 1.1s
+  sweep[C_decap|anchor=(5, 13)] 50pts in 1.2s
+  sweep[C_decap|anchor=(7, 7)] 50pts in 1.1s
+  sweep[C_decap|anchor=(7, 13)] 50pts in 1.3s
+  sweep[C_decap|anchor=(13, 13)] 50pts in 1.4s
+wrote datasets/regular_v7_anchors/dataset.h5

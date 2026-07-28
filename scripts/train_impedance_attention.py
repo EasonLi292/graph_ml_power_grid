@@ -225,6 +225,9 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--limit", type=int, default=None,
                     help="cap train samples (smoke tests)")
+    ap.add_argument("--keep-epochs", action="store_true",
+                    help="also write ckpt.epNNN.pt every epoch, so a "
+                         "checkpoint can be chosen after training")
     ap.add_argument("--learn-omega", action="store_true",
                     help="keep omega trainable; disables factor caching (slow)")
     ap.add_argument("--compare-baseline", type=Path, default=None)
@@ -306,10 +309,15 @@ def main() -> None:
         print(f"ep{ep:>3} loss {np.mean(losses):.4f} | {line} "
               f"({time.time()-t0:.0f}s)")
         args.ckpt.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"model": model.state_dict(), "epoch": ep,
-                    "cfg": vars(cfg), "args": {**vars(args),
-                                               "ckpt": str(args.ckpt)}},
-                   args.ckpt)
+        blob = {"model": model.state_dict(), "epoch": ep,
+                "cfg": vars(cfg), "args": {**vars(args),
+                                           "ckpt": str(args.ckpt)}}
+        torch.save(blob, args.ckpt)
+        if args.keep_epochs:
+            # held-out R2 peaks early and decays (all three ablations), so the
+            # last-epoch checkpoint is not the model the gate should judge.
+            # Keeping every epoch lets a checkpoint be selected after the fact.
+            torch.save(blob, args.ckpt.with_suffix(f".ep{ep:03d}.pt"))
 
     hp = args.ckpt.with_suffix(".history.json")
     hp.write_text(json.dumps({"history": history,
