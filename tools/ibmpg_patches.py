@@ -136,8 +136,13 @@ def load_graph(bench: str, graphs_dir: Path = GRAPHS_DIR) -> IBMGraph:
         g_gnd_full[d["Rg_node"]] = 1.0 / d["Rg_value"].astype(np.float64)
     # package inductors to ground (DC shorts to the reference)
     l_gnd_full = np.zeros(n, dtype=bool)
+    # ...and their reciprocal inductance, needed at w>0 where the DC-short
+    # approximation does not apply (parallel inductors: 1/L adds)
+    l_gnd_inv_full = np.zeros(n, dtype=np.float64)
     if "Lg_node" in d.files:
         l_gnd_full[d["Lg_node"]] = True
+        l_gnd_inv_full[d["Lg_node"]] = 1.0 / np.maximum(
+            d["Lg_value"].astype(np.float64), 1e-18)
 
     x_raw = {
         "layer":    pool_max(d["layer"]).astype(np.int8),
@@ -147,6 +152,7 @@ def load_graph(bench: str, graphs_dir: Path = GRAPHS_DIR) -> IBMGraph:
         "cap_gnd":  pool_sum(d["cap_gnd"]).astype(np.float32),
         "g_gnd":    pool_sum(g_gnd_full).astype(np.float32),
         "l_gnd":    pool_max(l_gnd_full) > 0,
+        "l_gnd_inv": pool_sum(l_gnd_inv_full).astype(np.float64),
         "v_dc":     pool_max(d["v_dc"]).astype(np.float32),
     }
     # load-timing backfill (scripts/patch_ibmpg_timing.py): exact
