@@ -147,17 +147,42 @@ def admittance(sys_: BranchSystem, R: torch.Tensor, C: torch.Tensor,
 
 
 def _subspace_factors(Y: torch.Tensor, probes: torch.Tensor, n_power: int):
-    """Randomized subspace iteration -> (p, s) with p_i . s_j ~= Z_ij.
+    """Randomized subspace iteration -> (p, s) with ``p_i^T s_j ~= Z_ij``.
 
-    Returns factors over FREE nodes only, shape [n_free, m] each.
+    Galerkin projection onto ``range(Qr)``: ``Z ~= Qr (Qr^H Z Qr) Qr^H``.
+
+    ``torch.linalg.qr`` returns a **unitary** ``Qr`` (``Qr^H Qr = I``), not a
+    complex-orthogonal one (``Qr^T Qr != I`` — measured 0.94 at w>0), so the
+    conjugate transpose is required in ``T`` and the conjugate in ``s``.
+    Using plain transposes silently gives ~100 % error at every w>0 while
+    staying exact at DC, where ``Y`` is real. Note ``p^T s`` below uses a
+    plain transpose by construction: the conjugation lives in ``s``.
+
+    Returns factors over FREE nodes only, shape ``[n_free, m]`` each.
     """
     X = torch.linalg.solve(Y, probes.to(Y.dtype))
     for _ in range(n_power):
         X = torch.linalg.solve(Y, X)
     Qr, _ = torch.linalg.qr(X)
     ZQ = torch.linalg.solve(Y, Qr)
-    T = Qr.transpose(-2, -1) @ ZQ          # [m, m]; plain transpose (Z symmetric)
-    return Qr, Qr @ T.transpose(-2, -1)
+    T = Qr.conj().transpose(-2, -1) @ ZQ          # [m, m] = Qr^H Z Qr
+    return Qr, Qr.conj() @ T.transpose(-2, -1)
+
+
+def channel_count(omegas) -> int:
+    """Number of REAL channels emitted by :func:`impedance_factors`.
+
+    A real (DC) system needs one channel; a complex one needs four, because
+    both parts of ``Z`` require cross terms:
+
+        Re(Z) = <p_re, s_re> - <p_im, s_im>
+        Im(Z) = <p_re, s_im> + <p_im, s_re>
+
+    Emitting only the diagonal pairs (re,re) and (im,im) makes ``Im(Z)``
+    unrepresentable — and ``|Im Z| / |Re Z|`` is ~0.30 at the load
+    frequency, i.e. phase information the transient target depends on.
+    """
+    return sum(1 if float(w) == 0.0 else 4 for w in omegas)
 
 
 def impedance_factors(
@@ -173,9 +198,10 @@ def impedance_factors(
     """Per-frequency observer/source factors on the FULL node axis.
 
     Returns ``(p, s)`` of shape ``[n_nodes, C_ch, m]`` with
-    ``C_ch = 2 * len(omegas)`` real channels (real and imaginary part of
-    each frequency). Load-node factors are the oriented terminal
-    difference; clamped pads are zero.
+    ``C_ch = channel_count(omegas)`` real channels: one at DC, four per
+    non-zero frequency (the (re,re), (im,im), (re,im), (im,re) pairings
+    needed to span both ``Re Z`` and ``Im Z``). Load-node factors are the
+    oriented terminal difference; clamped pads are zero.
     """
     dev, dt = R.device, R.dtype
     gen = torch.Generator(device="cpu").manual_seed(seed)
@@ -186,8 +212,13 @@ def impedance_factors(
     for f in range(omegas.shape[0]):
         Y = admittance(sys_, R, C, omegas[f], L)
         pf, sf = _subspace_factors(Y, probes, n_power)
-        p_ch += [pf.real, pf.imag]
-        s_ch += [sf.real, sf.imag]
+        if float(omegas[f]) == 0.0:
+            p_ch += [pf.real]
+            s_ch += [sf.real]
+        else:
+            # pairs spanning Re(Z) = rr - ii and Im(Z) = ri + ir
+            p_ch += [pf.real, pf.imag, pf.real, pf.imag]
+            s_ch += [sf.real, sf.imag, sf.imag, sf.real]
     p_free = torch.stack(p_ch, 1).to(dt)      # [n_free, C_ch, m]
     s_free = torch.stack(s_ch, 1).to(dt)
 

@@ -35,15 +35,16 @@ the node axis with a `graph_id` vector (no dense padding).
 | `h` | `[N, d_h]` | hidden state after input MLP, `d_h = 64` |
 | `q`, `k` | `[N, H, d_qk]` | content query / key, `H = 4`, `d_qk = 4` |
 | `v` | `[N, H, d_v]` | content value, `d_v = 32` |
-| `p` | `[N, C, m]` | **observer** impedance factor, `C = 2F` channels, `m = 16` |
+| `p` | `[N, C, m]` | **observer** impedance factor, `C = 1 + 4(F-1)` channels, `m = 16` |
 | `s` | `[N, C, m]` | **source** impedance factor |
 | `phi`, `psi` | `[N, H, C]` | learned per-head channel gains (§5) |
 | `q̃` | `[N, H, d_qk·C·m]` | `q ⊗ (phi·p)` |
 | `k̃` | `[N, H, d_qk·C·m]` | `k ⊗ (psi·s)` |
 | `cache` | `[H, d_qk·C·m, d_v]` | the KV cache — **independent of N** |
 
-`F = 3` frequencies → `C = 6` channels (real and imaginary part of each).
-`d_qk·C·m = 4·6·16 = 384`; cache is `4·384·32 ≈ 49 k` floats per graph.
+`F = 3` frequencies → `C = 9` channels: one at DC, **four** per non-zero
+frequency. Four is required, not padding — see §5.
+`d_qk·C·m = 4·9·16 = 576`; cache is `4·576·32 ≈ 74 k` floats per graph.
 
 ## 2. The factorized attention equation
 
@@ -123,6 +124,12 @@ Qr = qr(X).Q                     [N_free, m]
 T  = Qrᵀ solve(Y, Qr)            [m, m]  small and dense
 p_i = Qr_i                       s_j = (Qr Tᵀ)_j        →  p_iᵀ s_j ≈ Z_ij
 ```
+QR of a complex matrix returns a **unitary** `Qr` (`Qr^H Qr = I`), *not* a
+complex-orthogonal one — measured `‖QrᵀQr − I‖ = 0.94` at `ω>0` — so the
+Galerkin projection must use the conjugate transpose (`T = Qr^H Z Qr`,
+`s = conj(Qr) Tᵀ`). Plain transposes stay exact at DC, where `Y` is real,
+and give ~100 % error at every `ω>0`.
+
 Clamped pads get `p = s = 0` (they are voltage sources, zero transfer
 impedance) — physically correct, not a mask hack.
 
@@ -164,8 +171,21 @@ p_iᵀ s_j  ≡  Σ_c phi_c(x_i) · psi_c(x_j) · (p_i^c · s_j^c)
 ```
 Each `(p_i^c · s_j^c)` is invariant; `phi ≠ psi` makes the operator
 directional; both are learned from `x`, so source/observer/active/passive
-behaviour is inferred from features rather than hard-coded. Channel `c`
-ranges over (frequency, real/imag). Scores are divided by a per-graph
+behaviour is inferred from features rather than hard-coded.
+
+**Why four channels per frequency, not two.** `Z(ω)` is complex, and both
+parts carry signal (`|Im Z| / |Re Z| ≈ 0.30` at the load frequency — this is
+the phase information the transient target depends on). Expanding the
+complex product:
+```
+Re(Z) = <p_re, s_re> − <p_im, s_im>          (channels rr, ii)
+Im(Z) = <p_re, s_im> + <p_im, s_re>          (channels ri, ir)
+```
+Emitting only the diagonal pairings `rr` and `ii` — the obvious encoding —
+leaves `Im(Z)` **unrepresentable**: fitting it from `{rr, ii}` by least
+squares leaves 44 % residual. So each non-zero frequency emits all four
+pairings, and the learned gains recover either part. DC emits one channel
+(`Y` is real there). Scores are divided by a per-graph
 invariant scale (mean of `|p_i·s_i|` over loads) for conditioning.
 
 ## 6. Gradient paths

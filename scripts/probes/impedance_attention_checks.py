@@ -111,7 +111,24 @@ def check_physics():
                       - dc2["V_bot"][gg.load_pairs[:, 1].astype(int)]), dtype=DT)
         r = (d2 - dt2).abs().max().item() / dt2.abs().max().item()
         print(f"   rank-16 droop err ({nt},{nb})   {r:.4f}  (n_free={s2.n_free})")
-    ok = e1 < 1e-8 and e2 < 1e-8
+    # AC reconstruction: the complex factorization AND the real-channel
+    # encoding must both be exact. Regression guard for two bugs that were
+    # invisible at DC (unitary-vs-orthogonal QR; missing cross channels).
+    from tools.impedance_factors import admittance as _adm, channel_count
+    w = torch.tensor(2 * np.pi * FIXED_FREQ, dtype=DT)
+    om_ac = torch.stack([torch.zeros((), dtype=DT), w])
+    Zc = torch.linalg.inv(_adm(sys_, R, C, w))
+    pA, sA = impedance_factors(sys_, R, C, om_ac, m=sys_.n_free, n_power=0)
+    pA, sA = pA[:sys_.n_elec][live], sA[:sys_.n_elec][live]
+    assert pA.shape[1] == channel_count(om_ac) == 5
+    rr, ii = pA[:, 1] @ sA[:, 1].T, pA[:, 2] @ sA[:, 2].T
+    ri, ir = pA[:, 3] @ sA[:, 3].T, pA[:, 4] @ sA[:, 4].T
+    eR = (rr - ii - Zc.real).abs().max().item() / Zc.abs().max().item()
+    eI = (ri + ir - Zc.imag).abs().max().item() / Zc.abs().max().item()
+    frac = (Zc.imag.abs().median() / Zc.real.abs().median()).item()
+    print(f"   AC Re(Z) = rr - ii           {eR:.2e}")
+    print(f"   AC Im(Z) = ri + ir           {eI:.2e}   (|Im|/|Re| = {frac:.2f})")
+    ok = e1 < 1e-8 and e2 < 1e-8 and eR < 1e-10 and eI < 1e-10
     print(OK if ok else BAD)
     return ok
 

@@ -114,7 +114,10 @@ def load_split(h5_path, split):
 
 def build_cache(data, ac, omegas, m, n_power, tag, cache_dir: Path | None):
     """Precompute (p, s) per sample. Cached to disk keyed by config."""
-    key = f"{tag}_m{m}_q{n_power}_f{omegas.numel()}"
+    # channel count is part of the key: the AC-channel fix changed the layout
+    # and a stale cache would load silently with the wrong shape
+    from tools.impedance_factors import channel_count
+    key = f"{tag}_m{m}_q{n_power}_f{omegas.numel()}_c{channel_count(omegas)}"
     path = cache_dir / f"{key}.pt" if cache_dir else None
     if path is not None and path.exists():
         print(f"  factors <- {path}")

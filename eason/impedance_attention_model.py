@@ -125,11 +125,16 @@ class ImpedanceAttentionRegressor(nn.Module):
     """
 
     def __init__(self, cfg: ImpAttnConfig | None = None,
-                 target_space: str = "log", init_bias: float = 0.0) -> None:
+                 target_space: str = "log", init_bias: float = 0.0,
+                 n_ch: int | None = None) -> None:
         super().__init__()
         cfg = cfg or ImpAttnConfig()
         self.cfg = cfg
-        n_ch = 2 * cfg.n_freq
+        # 1 channel at DC + 4 per non-zero frequency (see
+        # tools.impedance_factors.channel_count). Pass n_ch explicitly if the
+        # frequency grid does not start at DC.
+        n_ch = n_ch if n_ch is not None else 1 + 4 * (cfg.n_freq - 1)
+        self.n_ch = n_ch
         h = cfg.hidden_dim
         self.encoder = nn.Sequential(
             nn.Linear(N_NODE_FEATURES + 1, h), nn.ReLU(), nn.Linear(h, h)
