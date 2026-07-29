@@ -171,22 +171,42 @@ GLOBAL_RANGES = ParamRanges(
 # Discrete supply-density knob
 # ---------------------------------------------------------------------------
 
-# Generalization-test split over (n_top, n_bot) topology anchors — two
-# die sizes (n_bot ∈ {7, 13}), several top track densities each. The
-# held-out anchors probe two distinct generalization axes:
-#
-# * ``(4, 7)``  — density interpolation on the small die (bracketed by
-#   the trained (3,7) and (7,7)).
-# * ``(7, 13)`` — a die size × density combination never trained:
-#   n_top=7 was seen only on the small die, n_bot=13 was seen only at
-#   densities 5 and 13. Tests transfer across die size.
+# Generalization-test split over (n_top, n_bot) topology anchors.
 #
 # Valid anchors are constrained by via alignment
 # ((n_bot−1) % (n_top−1) == 0) AND full cluster tap coverage — see
-# ``BOT_COL_PATTERNS`` in grid_construction. For n_bot=7 that means
-# {3,4,7}; for n_bot=13, {5,7,13}.
-TRAIN_ANCHORS: tuple[tuple[int, int], ...] = ((3, 7), (7, 7), (5, 13), (13, 13))
-TEST_ANCHORS:  tuple[tuple[int, int], ...] = ((4, 7), (7, 13))
+# ``BOT_COL_PATTERNS`` in grid_construction. Each supported die size
+# admits exactly three densities: {3,4,7} on n_bot=7, {5,7,13} on 13,
+# {7,10,19} on 19, {9,13,25} on 25, {11,16,31} on 31, {13,19,37} on 37.
+#
+# **Why 10 training topologies and not 4.** The previous split trained on
+# 4 anchors with 16k samples. Measured over 50 epochs on three different
+# architectures, that let the model memorise topology: the val score
+# (held-out *samples* of trained topologies) rose +0.675 → +0.969 while
+# held-out-*topology* test fell +0.755 → +0.117, a correlation of −0.29
+# to −0.49. Diversity, not sample count, is the binding constraint.
+#
+# The held-out anchors probe three distinct axes:
+#
+# * ``(4, 7)``  — density interpolation on the small die (bracketed by
+#   the trained (3,7) and (7,7)).
+# * ``(7, 13)`` — a die size × density combination never trained.
+#   These two are UNCHANGED from the 4-anchor split so every prior
+#   result on this track stays directly comparable.
+# * ``(11, 31)``, ``(31, 31)`` — size extrapolation. Nothing in training
+#   exceeds 1250 electrical nodes; these are 1082 and 1922 free nodes on
+#   a die 24 % wider than any trained one. This is the axis that matters
+#   for the IBM target, and the 4-anchor split could not test it at all.
+TRAIN_ANCHORS: tuple[tuple[int, int], ...] = (
+    (3, 7), (7, 7),                       # small die, 2 densities
+    (5, 13), (13, 13),                    # medium die, 2 densities
+    (7, 19), (10, 19), (19, 19),          # large die, 3 densities
+    (9, 25), (13, 25), (25, 25),          # larger die, 3 densities
+)
+TEST_ANCHORS:  tuple[tuple[int, int], ...] = (
+    (4, 7), (7, 13),                      # interpolation / cross-die (as before)
+    (11, 31), (31, 31),                   # size extrapolation (new)
+)
 ALL_ANCHORS:   tuple[tuple[int, int], ...] = tuple(
     sorted(set(TRAIN_ANCHORS) | set(TEST_ANCHORS))
 )

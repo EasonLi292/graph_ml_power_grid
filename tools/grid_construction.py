@@ -78,10 +78,40 @@ import numpy as np
 #   (step=4, taps {0,4,8,12}) misses Vss cluster {2,3} → floating DC
 #   island; n_top ∈ {2, 3} tap only Vdd. ``_top_col_pattern`` raises on
 #   those rather than silently building a singular grid.
+def bot_col_pattern(n_bot: int) -> tuple[int, ...]:
+    """Vdd/Vss column pattern for a die of ``n_bot`` columns, ``n_bot = 6k+1``.
+
+    The two hand-written patterns are one periodic family: an opening Vdd
+    pair, ``k-1`` repeats of a ``G G V V V V`` tile, then a closing
+    ``G G V V V``.
+
+        k=1  ->  V V G G V V V                      (n_bot=7)
+        k=2  ->  V V G G V V V V G G V V V          (n_bot=13)
+
+    Generating them instead of listing them is what makes more die sizes
+    reachable; ``k`` beyond 2 is new ground, so the generated 7 and 13 are
+    asserted against the shipped tuples below.
+    """
+    if n_bot < 7 or (n_bot - 1) % 6:
+        raise ValueError(f"n_bot must be 6k+1 with k>=1; got {n_bot}")
+    k = (n_bot - 1) // 6
+    return tuple([1, 1] + [0, 0, 1, 1, 1, 1] * (k - 1) + [0, 0, 1, 1, 1])
+
+
+# Die sizes the dataset may draw from. Extending this list is the lever on
+# topological diversity: each n_bot admits exactly 3 valid n_top (the
+# divisibility + cluster-coverage rules below), so anchors scale 3 per
+# entry. 6 anchors (n_bot 7, 13) was too few — 16k samples over 4 training
+# topologies let the model memorise topology, which showed up as val being
+# ANTI-correlated with held-out-topology test (see the trainer docstring).
+SUPPORTED_N_BOT: tuple[int, ...] = (7, 13, 19, 25, 31, 37)
+
 BOT_COL_PATTERNS: dict[int, tuple[int, ...]] = {
-    7:  (1, 1, 0, 0, 1, 1, 1),
-    13: (1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1),
+    nb: bot_col_pattern(nb) for nb in SUPPORTED_N_BOT
 }
+# the generator must reproduce the original hand-written patterns exactly
+assert BOT_COL_PATTERNS[7] == (1, 1, 0, 0, 1, 1, 1)
+assert BOT_COL_PATTERNS[13] == (1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1)
 # Back-compat alias (the original single-die-size constant).
 BOT_COL_PATTERN: tuple[int, ...] = BOT_COL_PATTERNS[7]
 

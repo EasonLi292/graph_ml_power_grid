@@ -97,29 +97,41 @@ def default_omegas(n_freq: int) -> torch.Tensor:
 
 
 class AnchorCache:
-    """Per-anchor topology + load waveforms (identical across samples)."""
+    """Per-anchor topology + load waveforms (identical across samples).
+
+    Built lazily. With the 14-anchor set the largest topology is (31,31)
+    at 1922 electrical nodes, so eagerly constructing every anchor costs
+    real time and memory for anchors a given run may never touch (e.g.
+    under ``--holdout-anchor``, or in probes that use one anchor).
+    """
 
     def __init__(self) -> None:
         self.sys, self.x, self.n_loads = {}, {}, {}
-        for nt, nb in ALL_ANCHORS:
-            a = (int(nt), int(nb))
-            proto = build_regular_pdn(n_top=a[0], n_bot=a[1])
-            loads = np.tile(
-                np.array([[FIXED_I_PEAK, FIXED_FREQ, FIXED_DUTY, FIXED_PHASE]]),
-                (proto.n_loads, 1))
-            g = build_regular_pdn(
-                n_top=a[0], n_bot=a[1], Rsheet_top=FIXED_RSHEET_TOP,
-                Rsheet_bot=FIXED_RSHEET_BOT, wire_width=0.5,
-                R_via=FIXED_R_VIA, C_decap=2e-10, freq=FIXED_FREQ, loads=loads)
-            s = branch_system(g)
-            self.sys[a] = (g, s)
-            self.x[a] = node_features(s, torch.tensor(loads, dtype=DT))
-            self.n_loads[a] = proto.n_loads
+
+    def _build(self, a: tuple[int, int]) -> None:
+        proto = build_regular_pdn(n_top=a[0], n_bot=a[1])
+        loads = np.tile(
+            np.array([[FIXED_I_PEAK, FIXED_FREQ, FIXED_DUTY, FIXED_PHASE]]),
+            (proto.n_loads, 1))
+        g = build_regular_pdn(
+            n_top=a[0], n_bot=a[1], Rsheet_top=FIXED_RSHEET_TOP,
+            Rsheet_bot=FIXED_RSHEET_BOT, wire_width=0.5,
+            R_via=FIXED_R_VIA, C_decap=2e-10, freq=FIXED_FREQ, loads=loads)
+        s = branch_system(g)
+        self.sys[a] = (g, s)
+        self.x[a] = node_features(s, torch.tensor(loads, dtype=DT))
+        self.n_loads[a] = proto.n_loads
+
+    def ensure(self, a: tuple[int, int]) -> tuple[int, int]:
+        a = (int(a[0]), int(a[1]))
+        if a not in self.sys:
+            self._build(a)
+        return a
 
 
 def sample_factors(ac: AnchorCache, anchor, wt, wb, cd, omegas, m, n_power,
                    want_fdc=False):
-    g, s = ac.sys[anchor]
+    g, s = ac.sys[ac.ensure(anchor)]
     R, C = knob_tensors(g, wt, wb, cd, FIXED_RSHEET_TOP, FIXED_RSHEET_BOT,
                         FIXED_R_VIA)
     p, sf = impedance_factors(s, R, C, omegas, m=m, n_power=n_power)
@@ -162,7 +174,7 @@ def build_cache(data, ac, omegas, m, n_power, tag, cache_dir: Path | None,
     out, t0 = [], time.time()
     n = data["n_top"].shape[0]
     for i in range(n):
-        a = (int(data["n_top"][i]), int(data["n_bot"][i]))
+        a = ac.ensure((data["n_top"][i], data["n_bot"][i]))
         g, s = ac.sys[a]
         te, be = g.top_edges.shape[0], g.bot_edges.shape[0]
         p, q_, fdc = sample_factors(
@@ -207,7 +219,7 @@ def evaluate(model, data, facs, ac, device):
     preds, targs, anchors = [], [], []
     with torch.no_grad():
         for i in range(data["n_top"].shape[0]):
-            a = (int(data["n_top"][i]), int(data["n_bot"][i]))
+            a = ac.ensure((data["n_top"][i], data["n_bot"][i]))
             _, s = ac.sys[a]
             p, sf, fdc = facs[i]
             y = model(ac.x[a].to(device), p.to(device), sf.to(device), s.n_elec,
@@ -359,7 +371,7 @@ def main() -> None:
         model.train()
         t0, losses = time.time(), []
         for i in rng.permutation(n):
-            a = (int(tr["n_top"][i]), int(tr["n_bot"][i]))
+            a = ac.ensure((tr["n_top"][i], tr["n_bot"][i]))
             _, s = ac.sys[a]
             p, sf, fdc = f_tr[i]
             pred = model(ac.x[a].to(args.device), p.to(args.device),
@@ -379,7 +391,17 @@ def main() -> None:
         # late epochs, so the last epoch is a noisy draw, not the model to
         # ship or to gate.
         vrep = evaluate(model, va, f_va, ac, args.device)
-        vscore = float(np.mean([v["worst_r2"] for v in vrep.values()]))
+        # Selection score: mean over anchors of R2 CLAMPED BELOW AT -1.
+        # per_anchor_metrics clamps SS_tot at 1e-30, so an anchor whose
+        # worst-load droop happens to have near-zero variance can emit an
+        # R2 of -1e23 and single-handedly decide selection (seen at -2e23
+        # on a 20-sample smoke). Anything below -1 is "worse than
+        # predicting the mean", and for *choosing a checkpoint* all such
+        # anchors are equally bad — so floor them rather than let one
+        # degenerate anchor outvote the other nine. Reporting stays
+        # unclamped; this affects selection only.
+        vscore = float(np.mean([max(v["worst_r2"], -1.0)
+                                for v in vrep.values()]))
         history.append({"epoch": ep, "train_loss": float(np.mean(losses)),
                         "test_per_anchor": rep, "val_per_anchor": vrep,
                         "val_score": vscore})
