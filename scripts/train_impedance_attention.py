@@ -151,9 +151,11 @@ def load_split(h5_path, split):
         }
 
 
-def filter_anchor(data, anchor, keep: bool):
-    """Subset ``data`` to (keep=True) or away from (keep=False) one anchor."""
-    sel = (data["n_top"] == anchor[0]) & (data["n_bot"] == anchor[1])
+def filter_anchors(data, anchors, keep: bool):
+    """Subset ``data`` to (keep=True) or away from (keep=False) ``anchors``."""
+    sel = np.zeros(data["n_top"].shape[0], dtype=bool)
+    for a in anchors:
+        sel |= (data["n_top"] == a[0]) & (data["n_bot"] == a[1])
     if not keep:
         sel = ~sel
     return {k: v[sel] for k, v in data.items()}
@@ -289,14 +291,18 @@ def main() -> None:
     ap.add_argument("--n-layers", type=int, default=7)
     ap.add_argument("--conv-type", default="edgeconv")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--holdout-anchor", default=None, metavar="NT,NB",
-                    help="Exclude this topology from training and use it as "
-                         "the val/selection signal. Without it, val is "
-                         "held-out SAMPLES of trained topologies, which on "
-                         "this dataset is ANTI-correlated with held-out "
-                         "TOPOLOGY performance (r=-0.29 bilinear, -0.49 "
-                         "kernel512 over 50 epochs) — see the module "
-                         "docstring. Costs 25%% of topological diversity.")
+    ap.add_argument("--holdout-anchor", nargs="*", default=None,
+                    metavar="NT,NB",
+                    help="Exclude these topologies from training and select "
+                         "on them. Without it, val is held-out SAMPLES of "
+                         "trained topologies, which is ANTI-correlated with "
+                         "held-out TOPOLOGY performance (r=-0.29 bilinear, "
+                         "-0.49 kernel512) — see the module docstring. "
+                         "Pass a whole die size (e.g. --holdout-anchor 9,25 "
+                         "13,25 25,25) to make the selection signal match "
+                         "the size-extrapolation test axis; a single anchor "
+                         "only holds out a density within a still-trained "
+                         "die size.")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
@@ -324,15 +330,18 @@ def main() -> None:
     tr, te = load_split(args.data, "train"), load_split(args.data, "test")
     va = load_split(args.data, "val")
     if args.holdout_anchor:
-        ho = tuple(int(v) for v in args.holdout_anchor.split(","))
+        hos = [tuple(int(v) for v in tok.split(","))
+               for tok in args.holdout_anchor]
         n_before = tr["n_top"].shape[0]
-        tr = filter_anchor(tr, ho, keep=False)      # never trained on
-        va = filter_anchor(va, ho, keep=True)       # selection signal only
-        print(f"topology holdout {ho}: train {n_before} -> "
+        tr = filter_anchors(tr, hos, keep=False)     # never trained on
+        va = filter_anchors(va, hos, keep=True)      # selection signal only
+        print(f"topology holdout {hos}: train {n_before} -> "
               f"{tr['n_top'].shape[0]}, val = {va['n_top'].shape[0]} samples "
-              f"of the held-out topology")
+              f"of the held-out topolog{'y' if len(hos) == 1 else 'ies'}")
         if va["n_top"].shape[0] == 0:
-            raise SystemExit(f"no val samples for anchor {ho}")
+            raise SystemExit(f"no val samples for anchors {hos}")
+        if tr["n_top"].shape[0] == 0:
+            raise SystemExit("holdout removed every training sample")
     if args.limit:
         tr = {k: v[:args.limit] for k, v in tr.items()}
         va = {k: v[:max(64, args.limit // 4)] for k, v in va.items()}
