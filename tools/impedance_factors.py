@@ -387,6 +387,38 @@ def load_factors(sys_: BranchSystem, p_e: torch.Tensor, s_e: torch.Tensor):
     return p_e[a] - p_e[b], s_e[a] - s_e[b]
 
 
+def local_rc_features(sys_: BranchSystem, R: torch.Tensor,
+                      C: torch.Tensor) -> torch.Tensor:
+    """Per-node incident conductance and capacitance, log10, shape [N, 2].
+
+    Until now the model could not see R or C **at all** except through the
+    impedance factors — ``node_features`` carries only node type and load
+    waveform. That forces every component-value question through the physics
+    pipeline, which is backwards if the aim is for the model to learn
+    dynamics from the circuit rather than be handed a frequency sweep.
+
+    Load rows take the mean of their two terminals. Differentiable in R and
+    C; the capacitance column is where the decap knob becomes directly
+    visible.
+    """
+    n_e = sys_.n_elec
+    g_sum = R.new_zeros(n_e)
+    c_sum = R.new_zeros(n_e)
+    if sys_.r_edges.numel():
+        gv = 1.0 / R
+        g_sum = g_sum.index_add(0, sys_.r_edges[:, 0], gv)
+        g_sum = g_sum.index_add(0, sys_.r_edges[:, 1], gv)
+    if sys_.c_edges.numel() and C.numel():
+        cv = C if C.dim() else C.expand(sys_.c_edges.shape[0])
+        c_sum = c_sum.index_add(0, sys_.c_edges[:, 0], cv)
+        c_sum = c_sum.index_add(0, sys_.c_edges[:, 1], cv)
+    a, b = sys_.load_terminals[:, 0], sys_.load_terminals[:, 1]
+    g_all = torch.cat([g_sum, 0.5 * (g_sum[a] + g_sum[b])], 0)
+    c_all = torch.cat([c_sum, 0.5 * (c_sum[a] + c_sum[b])], 0)
+    return torch.stack([g_all.clamp_min(1e-30).log10(),
+                        c_all.clamp_min(1e-30).log10() + 10.0], -1)
+
+
 def node_features(sys_: BranchSystem, loads: torch.Tensor,
                   log_R_stats=None) -> torch.Tensor:
     """Shared node-feature matrix for electrical AND load nodes.

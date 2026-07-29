@@ -57,7 +57,7 @@ class ImpAttnConfig:
     content: bool = True      # ablation: content-only  (q.k)
     impedance: bool = True    # ablation: impedance-only (p.s)
     # --- nonlinear kernel score -------------------------------------
-    score: str = "bilinear"   # "bilinear" | "kernel" | "dynamic_kernel"
+    score: str = "bilinear"   # "bilinear"|"kernel"|"dynamic_kernel"|"simple"
     n_scales: int = 3         # learnable gammas per head
     kernel_feature: str = "rff"   # "rff" | "taylor"
     n_rff: int = 128          # random Fourier features per (head, scale)
@@ -82,6 +82,10 @@ class ImpAttnConfig:
     # because diagonal impedance falls faster with omega than off-diagonal
     # does. See docs/analysis/freq_norm_audit.json.
     freq_norm_mode: str = "frob"
+    # Feed per-node incident conductance and capacitance (log10). Until this
+    # existed the model could not see R or C except through the impedance
+    # factors. False reproduces pre-existing checkpoints.
+    local_rc: bool = False
 
 
 class ImpedanceAttention(nn.Module):
@@ -329,6 +333,79 @@ class KernelImpedanceAttention(ImpedanceAttention):
         return self.norm(hstate + self.out(out.reshape(N, H * self.cfg.d_v)))
 
 
+class SimpleDistanceAttention(nn.Module):
+    """The cheapest defensible score: one pairwise physical scalar.
+
+        A_h(i<-j) = phi_h(i) . psi_h(j)  over  [ 1 , RFF(u_i) ]
+
+    where ``u`` is the symmetric DC factor, so the RFF block approximates a
+    Gaussian kernel of **DC effective resistance** — one scalar per pair,
+    basis-invariant, and reciprocal and well-conditioned at every rank
+    (measured 6e-16 reciprocity and probe-seed gradient rank ~1.0, versus
+    0.15-0.24 and ~0.7 for the AC channels).
+
+    Everything frequency- and time-dependent is left to be **learned** from
+    local component values (``local_rc_features``) and load waveform
+    features, rather than handed over as a solved frequency sweep. The
+    constant block is the one content term.
+
+    This exists to falsify the multi-frequency stack: if it is not
+    materially worse on forward accuracy, the extra machinery is not earning
+    its complexity.
+
+    Known limitation, stated rather than hidden: ``d(R_eff)/d(C) = 0``
+    exactly, so any capacitance sensitivity must come through the local-C
+    node feature and the learned dynamics. Whether that suffices is the
+    experiment.
+    """
+
+    def __init__(self, cfg: ImpAttnConfig, m: int) -> None:
+        super().__init__()
+        self.cfg = cfg
+        h, H, T, D = cfg.hidden_dim, cfg.heads, cfg.n_scales, cfg.n_rff
+        self.T, self.D = T, D
+        self.n_blocks = 1 + T                      # content + one per scale
+        self.register_buffer("block_of", torch.cat(
+            [torch.zeros(1, dtype=torch.long),
+             torch.repeat_interleave(torch.arange(1, T + 1),
+                                     torch.full((T,), D))]))
+        self.F = 1 + T * D
+        self.log_gamma = nn.Parameter(torch.linspace(-1.0, 1.5, T).repeat(H, 1))
+        self.phi = nn.Linear(h, H * self.n_blocks)
+        self.psi = nn.Linear(h, H * self.n_blocks)
+        self.v = nn.Linear(h, H * cfg.d_v)
+        self.out = nn.Linear(H * cfg.d_v, h)
+        self.norm = nn.LayerNorm(h)
+        g = torch.Generator().manual_seed(0)
+        self.register_buffer("w0", torch.randn(D, m, generator=g))
+        self.register_buffer("rb", 2 * np.pi * torch.rand(D, generator=g))
+        nn.init.zeros_(self.phi.weight); nn.init.ones_(self.phi.bias)
+        nn.init.zeros_(self.psi.weight); nn.init.ones_(self.psi.bias)
+
+    def _maps(self, hstate, fdc):
+        N, H, T, D = hstate.shape[0], self.cfg.heads, self.T, self.D
+        gam = F.softplus(self.log_gamma)                       # [H, T]
+        wht = torch.sqrt(2 * gam).view(H, T, 1, 1) * self.w0   # [H,T,D,m]
+        z = np.sqrt(2.0 / D) * torch.cos(
+            torch.einsum("nm,htdm->nhtd", fdc, wht) + self.rb)
+        U = torch.cat([z.new_ones(N, H, 1), z.reshape(N, H, T * D)], -1)
+        gphi = self.phi(hstate).view(N, H, self.n_blocks)
+        gpsi = self.psi(hstate).view(N, H, self.n_blocks)
+        return U * gphi[..., self.block_of], U * gpsi[..., self.block_of]
+
+    def forward(self, hstate, fdc, naive: bool = False):
+        N, H = hstate.shape[0], self.cfg.heads
+        v = self.v(hstate).view(N, H, self.cfg.d_v)
+        Phi, Psi = self._maps(hstate, fdc)
+        if naive:
+            score = torch.einsum("ihd,jhd->hij", Phi, Psi)     # TEST PATH ONLY
+            out = torch.einsum("hij,jhe->ihe", score, v)
+        else:
+            cache = torch.einsum("jhD,jhe->hDe", Psi, v)
+            out = torch.einsum("ihD,hDe->ihe", Phi, cache)
+        return self.norm(hstate + self.out(out.reshape(N, H * self.cfg.d_v)))
+
+
 def _sym_square(a: torch.Tensor) -> torch.Tensor:
     """Symmetric tensor square with <sym(a), sym(b)> == <a, b>**2 exactly.
 
@@ -489,11 +566,20 @@ class ImpedanceAttentionRegressor(nn.Module):
         # monotone function of it leaves the per-observer ordering over
         # sources unchanged (measured). Letting phi/psi see z_ii and z_jj
         # is what allows the score to reorder at all.
-        n_selfz = self.n_inv if cfg.score == "dynamic_kernel" else n_ch
+        if cfg.score == "simple":
+            n_selfz = 1                     # DC self-impedance only
+        elif cfg.score == "dynamic_kernel":
+            n_selfz = self.n_inv
+        else:
+            n_selfz = n_ch
+        self.n_extra = 2 if cfg.local_rc else 0
         self.encoder = nn.Sequential(
-            nn.Linear(N_NODE_FEATURES + n_selfz, h), nn.ReLU(), nn.Linear(h, h)
+            nn.Linear(N_NODE_FEATURES + self.n_extra + n_selfz, h),
+            nn.ReLU(), nn.Linear(h, h)
         )
-        if cfg.score == "dynamic_kernel":
+        if cfg.score == "simple":
+            self.attn = SimpleDistanceAttention(cfg, cfg.m_factor)
+        elif cfg.score == "dynamic_kernel":
             dims = ([cfg.m_factor]
                     + [2 * cfg.m_factor] * (self.n_inv - 1))
             self.attn = DynamicKernelAttention(cfg, dims)
@@ -646,6 +732,15 @@ class ImpedanceAttentionRegressor(nn.Module):
 
         Returns one droop prediction per load node, shape [L].
         """
+        if self.cfg.score == "simple":
+            if fdc is None:
+                raise ValueError("score='simple' needs the symmetric DC "
+                                 "factor (dc_symmetric_factor)")
+            fn = fdc / fdc.norm(dim=-1, keepdim=True).mean().clamp_min(1e-30)
+            zdc = (fn * fn).sum(-1, keepdim=True).clamp_min(1e-30).log10()
+            hstate = self.encoder(torch.cat([x, zdc], -1))
+            hstate = self.attn(hstate, fn, naive=naive)
+            return self.decoder(hstate[n_elec:]).squeeze(-1)
         if self.cfg.score == "dynamic_kernel":
             hstate, chans = self.embed_invariant(x, p, s, n_elec)
             hstate = self.attn(hstate, chans, naive=naive)

@@ -72,6 +72,7 @@ from tools.impedance_factors import (
     dc_symmetric_factor,
     impedance_factors,
     knob_tensors,
+    local_rc_features,
     node_features,
 )
 from tools.pyg_dataset import LOG_FLOOR
@@ -138,6 +139,25 @@ def sample_factors(ac: AnchorCache, anchor, wt, wb, cd, omegas, m, n_power,
     fdc = (dc_symmetric_factor(s, R, C, m=m, n_power=n_power)
            if want_fdc else None)
     return p, sf, fdc
+
+
+def sample_x(ac, a, data, i, local_rc: bool):
+    """Base node features plus, optionally, this sample's local R/C.
+
+    The knobs vary per sample, so the local component features cannot be
+    cached per anchor the way the base features are.
+    """
+    base = ac.x[a]
+    if not local_rc:
+        return base
+    g, s = ac.sys[a]
+    te, be = g.top_edges.shape[0], g.bot_edges.shape[0]
+    R, C = knob_tensors(
+        g, torch.tensor(data["wt"][i, :te], dtype=DT),
+        torch.tensor(data["wb"][i, :be], dtype=DT),
+        torch.tensor(float(data["gp"][i, 1]), dtype=DT),
+        FIXED_RSHEET_TOP, FIXED_RSHEET_BOT, FIXED_R_VIA)
+    return torch.cat([base, local_rc_features(s, R, C)], -1)
 
 
 def load_split(h5_path, split):
@@ -224,7 +244,8 @@ def evaluate(model, data, facs, ac, device):
             a = ac.ensure((data["n_top"][i], data["n_bot"][i]))
             _, s = ac.sys[a]
             p, sf, fdc = facs[i]
-            y = model(ac.x[a].to(device), p.to(device), sf.to(device), s.n_elec,
+            xi = sample_x(ac, a, data, i, model.cfg.local_rc)
+            y = model(xi.to(device), p.to(device), sf.to(device), s.n_elec,
                       fdc=None if fdc is None else fdc.to(device))
             nl = ac.n_loads[a]
             t = np.log10(np.maximum(data["y"][i, :nl], LOG_FLOOR))
@@ -275,7 +296,13 @@ def main() -> None:
     ap.add_argument("--m-factor", type=int, default=16)
     ap.add_argument("--n-power", type=int, default=2)
     ap.add_argument("--score", default="bilinear",
-                    choices=["bilinear", "kernel", "dynamic_kernel"])
+                    choices=["bilinear", "kernel", "dynamic_kernel", "simple"])
+    ap.add_argument("--local-rc", action="store_true",
+                    help="append per-node incident conductance and "
+                         "capacitance (log10). Without it the model cannot "
+                         "see R or C except through the impedance factors, "
+                         "which is the only channel the 'simple' score has "
+                         "for capacitance at all.")
     ap.add_argument("--max-degree", type=int, default=2,
                     help="dynamic_kernel: polynomial degree per invariant "
                          "impedance channel (0=content only, 1=bilinear, "
@@ -328,7 +355,7 @@ def main() -> None:
             "path assumes frozen omega. Run with frozen omega for the "
             "prototype (see the design note's unresolved item 2).")
 
-    want_fdc = args.score == "kernel"
+    want_fdc = args.score in ("kernel", "simple")
     ac = AnchorCache()
     omegas = default_omegas(args.n_freq)
     print(f"omegas (rad/s): {[f'{float(w):.3e}' for w in omegas]}")
@@ -377,7 +404,7 @@ def main() -> None:
         content=args.ablation in ("combined", "content"),
         impedance=args.ablation in ("combined", "impedance"),
         score=args.score, n_scales=args.n_scales, n_rff=args.n_rff,
-        max_degree=args.max_degree)
+        max_degree=args.max_degree, local_rc=args.local_rc)
     # start at the mean-predictor baseline (see model init docstring)
     ymask = np.isfinite(tr["y"]) & (tr["y"] > 0)
     init_bias = float(np.log10(np.maximum(tr["y"][ymask], LOG_FLOOR)).mean())
@@ -398,7 +425,8 @@ def main() -> None:
             a = ac.ensure((tr["n_top"][i], tr["n_bot"][i]))
             _, s = ac.sys[a]
             p, sf, fdc = f_tr[i]
-            pred = model(ac.x[a].to(args.device), p.to(args.device),
+            xi = sample_x(ac, a, tr, i, cfg.local_rc)
+            pred = model(xi.to(args.device), p.to(args.device),
                          sf.to(args.device), s.n_elec,
                          fdc=None if fdc is None else fdc.to(args.device))
             nl = ac.n_loads[a]
