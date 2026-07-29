@@ -134,14 +134,16 @@ class ImpedanceAdapter:
     here even though training uses it.
     """
 
-    def __init__(self, model, omegas, m, n_power):
+    def __init__(self, model, omegas, m, n_power, want_fdc: bool = False):
         from tools.impedance_factors import branch_system, node_features
         self.model, self.omegas, self.m, self.n_power = model, omegas, m, n_power
+        self.want_fdc = want_fdc
         self._bs, self._nf = branch_system, node_features
         self._cache = {}
 
     def __call__(self, g, ww_top, ww_bot, C_decap):
-        from tools.impedance_factors import impedance_factors, knob_tensors
+        from tools.impedance_factors import (dc_symmetric_factor,
+                                             impedance_factors, knob_tensors)
         key = (g.n_top, g.n_bot)
         if key not in self._cache:
             s = self._bs(g)
@@ -154,7 +156,16 @@ class ImpedanceAdapter:
                             FIXED_RSHEET_TOP, FIXED_RSHEET_BOT, FIXED_R_VIA)
         p, sf = impedance_factors(s, R, C, self.omegas, m=self.m,
                                   n_power=self.n_power)
-        return (10.0 ** self.model(x, p, sf, s.n_elec)).max()
+        # The kernel score needs the symmetric DC factor, rebuilt here under
+        # autograd like everything else. Note what this implies: the kernel
+        # term is a function of DC effective resistance, so its gradient to
+        # C_decap is structurally zero (a capacitor is an open circuit at
+        # DC). Decap sensitivity therefore still rides entirely on the
+        # bilinear term's AC channels — the kernel can only reweight the
+        # resistive picture.
+        fdc = (dc_symmetric_factor(s, R, C, m=self.m, n_power=self.n_power)
+               if self.want_fdc else None)
+        return (10.0 ** self.model(x, p, sf, s.n_elec, fdc=fdc)).max()
 
 
 def model_worst(model, g, ww_top, ww_bot, C_decap):
@@ -303,7 +314,8 @@ def main():
         sa = state.get("args", {})
         model = ImpedanceAdapter(
             inner, default_omegas(cfg.n_freq).double(),
-            cfg.m_factor, int(sa.get("n_power", 2)))
+            cfg.m_factor, int(sa.get("n_power", 2)),
+            want_fdc=getattr(cfg, "score", "bilinear") == "kernel")
     else:
         model = PDNDroopRegressor(
             EncoderConfig(hidden_dim=args.hidden_dim, n_layers=args.n_layers,

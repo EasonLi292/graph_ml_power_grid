@@ -86,6 +86,25 @@ restricted, and RFF adds approximation noise (≈0.13 absolute at D=128).
 How much of the 0.577 the deployed form actually reaches is what the
 synthetic training run and a follow-up IBM pass will show.
 
+## Structural limit: the kernel carries no decap gradient
+
+The kernel is a function of DC effective resistance, and a capacitor is an
+open circuit at DC. Measured, not assumed — autograd through
+`dc_symmetric_factor`:
+
+| path | d/d(C_decap) | d/d(ww_top) |
+|---|---|---|
+| kernel term (`fdc`) | **None** (never participates) | 3.30 |
+| bilinear term, AC channels | 2.1e10 | — |
+
+So decap sensitivity rides *entirely* on the bilinear term's AC channels;
+the kernel can only reweight the resistive picture. Since decap is one of
+the three design knobs the repair loop turns, this bounds what the kernel
+can contribute to that knob to exactly zero, and it is why the bilinear
+term is kept rather than replaced. If the gate shows decap sign accuracy
+is the binding failure, adding scales is the wrong fix — the kernel would
+need an AC-distance analogue (a complex `R_eff`), which is not built.
+
 ## Choosing `n_rff` — measured, and the metric matters
 
 The trainer default was `n_rff=128`, inherited from check 8 which reports
