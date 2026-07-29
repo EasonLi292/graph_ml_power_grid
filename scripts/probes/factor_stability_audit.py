@@ -115,10 +115,10 @@ def relnorm(a, b=None):
                  / b.abs().pow(2).sum().sqrt().clamp_min(1e-300))
 
 
-def make_model(m_dc, m_ac, n_freq, score, seed=0):
+def make_model(m_dc, m_ac, n_freq, score, seed=0, invariant=True):
     torch.manual_seed(seed)
     cfg = ImpAttnConfig(hidden_dim=32, heads=3, d_v=16, n_freq=n_freq,
-                        m_factor=m_dc, score=score)
+                        m_factor=m_dc, score=score, invariant=invariant)
     mdl = ImpedanceAttentionRegressor(cfg, init_bias=-3.6).to(DT)
     if score == "dynamic_kernel":
         # rebuild attention with the real per-channel widths
@@ -159,8 +159,12 @@ def audit_circuit(nt, nb, ranks, om, want_model=True):
                     [torch.einsum("id,jd->ij", A, B).flatten() for A, B, _ in chans]))
                 if want_model:
                     wid = p.shape[-1]
-                    for sc_name in ("bilinear", "dynamic_kernel"):
-                        mdl = make_model(wid, wid, om.shape[0], sc_name)
+                    for sc_name, inv in (("bilinear_raw", False),
+                                         ("bilinear_inv", True),
+                                         ("dynamic_kernel", True)):
+                        base = "bilinear" if sc_name.startswith("bilinear") else sc_name
+                        mdl = make_model(wid, wid, om.shape[0], base,
+                                         invariant=inv)
                         wt_g = wt.clone().requires_grad_(True)
                         cd_g = cd.clone().requires_grad_(True)
                         Rg, Cg = knob_tensors(g, wt_g, wb, cd_g,
@@ -174,15 +178,19 @@ def audit_circuit(nt, nb, ranks, om, want_model=True):
                         per_seed.setdefault(f"pred_{sc_name}", []).append(float(y.detach()))
                         per_seed.setdefault(f"gw_{sc_name}", []).append(gw.clone())
                         per_seed.setdefault(f"gc_{sc_name}", []).append(float(gc))
-                    mdl = make_model(wid, wid, om.shape[0], "bilinear")
-                    per_seed["pred"] = per_seed["pred_bilinear"]
-                    per_seed["gw"] = per_seed["gw_bilinear"]
-                    per_seed["gc"] = per_seed["gc_bilinear"]
+                    per_seed["pred"] = per_seed["pred_bilinear_raw"]
+                    per_seed["gw"] = per_seed["gw_bilinear_raw"]
+                    per_seed["gc"] = per_seed["gc_bilinear_raw"]
                     with torch.no_grad():
-                        hs, pn, sn = mdl.embed(x, p, s, s_.n_elec)
-                        P, S = mdl.attn._factor_terms(hs, pn, sn)
-                        q = mdl.attn.q(hs).view(hs.shape[0], 3, -1)
-                        k = mdl.attn.k(hs).view(hs.shape[0], 3, -1)
+                        # attention-score spread measured on the raw-channel
+                        # bilinear model, which is the one that has a
+                        # [N,N]-expressible score
+                        amdl = make_model(wid, wid, om.shape[0], "bilinear",
+                                          invariant=False)
+                        hs, pn, sn = amdl.embed(x, p, s, s_.n_elec)
+                        P, S = amdl.attn._factor_terms(hs, pn, sn)
+                        q = amdl.attn.q(hs).view(hs.shape[0], 3, -1)
+                        k = amdl.attn.k(hs).view(hs.shape[0], 3, -1)
                         sc = (torch.einsum("ihd,jhd->hij", q, k)
                               * torch.einsum("ihd,jhd->hij", P, S))
                         per_seed["attn"].append(sc.flatten())
@@ -197,14 +205,32 @@ def audit_circuit(nt, nb, ranks, om, want_model=True):
                 gc = np.array(per_seed["gc"])
                 row["gc_spread_rel"] = float(gc.std() / max(abs(gc.mean()), 1e-30))
                 row["attn_spread"] = seed_spread(per_seed["attn"])
-                for sc_name in ("bilinear", "dynamic_kernel"):
+                for sc_name in ("bilinear_raw", "bilinear_inv", "dynamic_kernel"):
                     pr = np.array(per_seed[f"pred_{sc_name}"])
                     gc2 = np.array(per_seed[f"gc_{sc_name}"])
                     row[f"pred_spread_{sc_name}"] = float(pr.std() / max(abs(pr.mean()), 1e-30))
                     row[f"gw_spread_{sc_name}"] = seed_spread(per_seed[f"gw_{sc_name}"])
+                    row[f"gw_rank_{sc_name}"] = seed_rank_agreement(per_seed[f"gw_{sc_name}"])
                     row[f"gc_spread_{sc_name}"] = float(gc2.std() / max(abs(gc2.mean()), 1e-30))
             rows.append(row)
     return rows
+
+
+def seed_rank_agreement(vs):
+    """Mean pairwise Spearman of a gradient vector across probe seeds.
+
+    seed_spread is a max-normalised range, so one near-zero entry that
+    flips sign pins it near 1.0 regardless of rank. What repair actually
+    consumes is the ORDERING of candidate sites, so measure that directly:
+    1.0 means every probe seed ranks the sites identically.
+    """
+    from scipy.stats import spearmanr
+    if len(vs) < 2:
+        return float("nan")
+    arrs = [v.flatten().detach().cpu().numpy() for v in vs]
+    rs = [float(spearmanr(arrs[i], arrs[j]).statistic)
+          for i in range(len(arrs)) for j in range(i + 1, len(arrs))]
+    return float(np.mean(rs))
 
 
 def seed_spread(vs):
@@ -233,7 +259,8 @@ def main():
         all_rows += rows
         hdr = (f"{'variant':>14} {'m':>4} {'wid':>4} {'ms':>6} | "
                f"{'recipAC':>9} {'reconAC':>9} | {'chan':>8} | "
-               f"{'d/dww bil':>9} {'d/dww dyn':>9} | {'d/dC bil':>8} {'d/dC dyn':>8}")
+               f"{'dww raw':>8} {'dww inv':>8} {'dww dyn':>8} | "
+               f"{'rank raw':>8} {'rank inv':>8} {'rank dyn':>8}")
         print(hdr)
         for r in rows:
             rc, rn = r["reciprocity"], r["reconstruction"]
@@ -244,8 +271,10 @@ def main():
                 tag = "D_exact"
             print(f"{tag:>14} {r['m']:>4} {r['width']:>4} {r['factor_ms']:>6.0f} | "
                   f"{ac_rc:>9.1e} {ac_rn:>9.1e} | {r['chan_spread']:>8.1e} | "
-                  f"{r['gw_spread_bilinear']:>9.1e} {r['gw_spread_dynamic_kernel']:>9.1e} | "
-                  f"{r['gc_spread_bilinear']:>8.1e} {r['gc_spread_dynamic_kernel']:>8.1e}")
+                  f"{r['gw_spread_bilinear_raw']:>8.1e} {r['gw_spread_bilinear_inv']:>8.1e} "
+                  f"{r['gw_spread_dynamic_kernel']:>8.1e} | "
+                  f"{r['gw_rank_bilinear_raw']:>+8.3f} {r['gw_rank_bilinear_inv']:>+8.3f} "
+                  f"{r['gw_rank_dynamic_kernel']:>+8.3f}")
 
     print("\nreciprocity = ||Z-Z^T||/||Z||;  recon = vs dense inverse;")
     print("chan/pred/d-dww/d-dC/attn = max spread across the 4 probe seeds.")

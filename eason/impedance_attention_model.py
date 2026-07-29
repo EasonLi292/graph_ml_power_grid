@@ -40,7 +40,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from tools.impedance_factors import (invariant_channel_count,
-                                     invariant_channels)
+                                     invariant_channels,
+                                     invariant_factor_tensors)
 
 N_NODE_FEATURES = 10          # tools.impedance_factors.node_features
 
@@ -63,6 +64,13 @@ class ImpAttnConfig:
     taylor_k: int = 2         # taylor only; unusable past gamma ~0.1 (see below)
     # --- unified dynamic-impedance kernel ---------------------------
     max_degree: int = 2       # polynomial degree in each invariant channel
+    # Consume BASIS-INVARIANT impedance channels (Z at DC, Re Z / Im Z per
+    # frequency) instead of the four raw real channels per frequency. The
+    # raw AC channels are not individually basis-invariant, and a model
+    # built on them has ~100 % probe-seed dependence in its wire and decap
+    # sensitivities even at exact rank (docs/FACTOR_STABILITY_AUDIT.md).
+    # False reproduces every pre-back-port checkpoint.
+    invariant: bool = True
 
 
 class ImpedanceAttention(nn.Module):
@@ -441,7 +449,11 @@ class ImpedanceAttentionRegressor(nn.Module):
         # 1 channel at DC + 4 per non-zero frequency (see
         # tools.impedance_factors.channel_count). Pass n_ch explicitly if the
         # frequency grid does not start at DC.
-        n_ch = n_ch if n_ch is not None else 1 + 4 * (cfg.n_freq - 1)
+        self._omegas_layout = [0.0] + [1.0] * (cfg.n_freq - 1)
+        self.n_inv = invariant_channel_count(self._omegas_layout)
+        if n_ch is None:
+            n_ch = (self.n_inv if cfg.invariant
+                    else 1 + 4 * (cfg.n_freq - 1))
         self.n_ch = n_ch
         h = cfg.hidden_dim
         # +n_ch: PER-CHANNEL log self-impedance. This is the multivariate
@@ -449,15 +461,10 @@ class ImpedanceAttentionRegressor(nn.Module):
         # monotone function of it leaves the per-observer ordering over
         # sources unchanged (measured). Letting phi/psi see z_ii and z_jj
         # is what allows the score to reorder at all.
-        n_selfz = (invariant_channel_count([0.0] + [1.0] * (cfg.n_freq - 1))
-                   if cfg.score == "dynamic_kernel" else n_ch)
+        n_selfz = self.n_inv if cfg.score == "dynamic_kernel" else n_ch
         self.encoder = nn.Sequential(
             nn.Linear(N_NODE_FEATURES + n_selfz, h), nn.ReLU(), nn.Linear(h, h)
         )
-        # Invariant-channel layout: DC (width m) + Re/Im per non-zero
-        # frequency (width 2m each). Only used by the dynamic kernel.
-        self._omegas_layout = [0.0] + [1.0] * (cfg.n_freq - 1)
-        self.n_inv = invariant_channel_count(self._omegas_layout)
         if cfg.score == "dynamic_kernel":
             dims = ([cfg.m_factor]
                     + [2 * cfg.m_factor] * (self.n_inv - 1))
@@ -495,6 +502,8 @@ class ImpedanceAttentionRegressor(nn.Module):
         Exposed so probes can inspect the pre-attention state without
         re-implementing the feature construction (which has drifted once).
         """
+        if self.cfg.invariant:
+            p, s = invariant_factor_tensors(p, s, self._omegas_layout)
         p, s = self.normalize_factors(p, s, n_elec)
         selfz = (p * s).sum(-1).abs().clamp_min(1e-30).log10()     # [N, n_ch]
         return self.encoder(torch.cat([x, selfz], -1)), p, s

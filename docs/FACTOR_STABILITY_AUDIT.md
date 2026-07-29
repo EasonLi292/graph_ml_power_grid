@@ -65,6 +65,45 @@ Three things follow, and they are the point of the audit:
    (0.37 -> 0.099 -> 0.079), which is ordinary sketch error rather than
    basis dependence.
 
+## 2b. The decisive metric: does the repair-site RANKING survive?
+
+`seed_spread` is a max-normalised range, so a single near-zero gradient
+entry that flips sign pins it near 1.0 regardless of ordering. What a repair
+loop consumes is the ORDER of candidate sites, so measure that: mean
+pairwise Spearman of the `d/dww` vector across the 4 probe seeds.
+
+Anchor (7,13), current (hermitian) factors:
+
+| rank | raw channels | invariant channels | dynamic kernel |
+|---|---|---|---|
+| m=8 | **-0.048** | +0.332 | **+0.837** |
+| m=16 | **-0.034** | +0.351 | **+0.962** |
+| m=32 | +0.004 | +0.479 | **+0.979** |
+| exact rank, anchor (3,7) | +0.152 | **+1.000** | **+1.000** |
+
+**The raw-channel model's repair-site ranking is uncorrelated across probe
+seeds.** Change the random probe basis and it ranks where-to-fix completely
+differently — rho within noise of zero at every rank. Its gradients carry no
+reproducible information about repair location.
+
+Invariant channels lift this to +0.33..+0.48 at reduced rank and to exactly
++1.000 at exact rank, confirming the mechanism. But +0.35 at the m=16
+training default is still not usable.
+
+The dynamic kernel reaches **+0.96 at m=16** and improves with rank. Part of
+that is the invariant channels and part is its structure: the degree-0
+(content) block is probe-independent and anchors the score, and it
+normalises on the DC channel alone.
+
+Caveat: these are randomly-initialised models. This measures the
+architecture's conditioning with respect to the probe basis, not learned
+behaviour. It does not say the dynamic kernel predicts better — only that
+its gradients are a reproducible function of the circuit, which is a
+precondition for the counterfactual work rather than a result of it.
+
+`C_complex_sym` sits at rho ~ 0 everywhere, independently confirming its
+rejection.
+
 ## 3. Reconstruction — and why symmetrization loses at equal width
 
 `||Z_hat - Z_exact|| / ||Z_exact||` at w > 0, anchor (7,13):
@@ -99,7 +138,18 @@ Per the stated rule:
   non-reciprocal device set, where global passive symmetrization would be
   wrong anyway.
 - The complex-symmetric projection is rejected.
-- **The correction belongs in the architecture**, and it already exists:
+- **The correction belongs in the architecture.** It is now the default for
+  every score (`ImpAttnConfig.invariant=True`); `False` reproduces
+  pre-back-port checkpoints, and the gate defaults old checkpoints to
+  `False` since their stored config predates the field.
+- **The back-port is necessary but not sufficient.** It takes the bilinear
+  score's gradient-ranking reproducibility from rho ~ 0 to +0.35 at m=16 and
+  to +1.000 at exact rank, but +0.35 is not usable. Only the dynamic kernel
+  reaches a reproducible regime at the training rank (+0.96). **So for step 5
+  of the plan — "train one stable existing architecture first" — the stable
+  one is the dynamic kernel, not the bilinear control.** That is a
+  conditioning statement, not a claim about accuracy.
+- Mechanism, for the record:
   regroup the four raw real channels per frequency into the two invariant
   ones (`Re Z = rr - ii`, `Im Z = ri + ir`) before any learned gain touches
   them. `invariant_channels()` in `tools/impedance_factors.py`.

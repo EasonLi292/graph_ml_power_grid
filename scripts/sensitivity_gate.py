@@ -396,7 +396,12 @@ def main():
         from eason.impedance_attention_model import (
             ImpAttnConfig, ImpedanceAttentionRegressor)
         from scripts.train_impedance_attention import default_omegas
-        cfg = ImpAttnConfig(**state["cfg"]) if "cfg" in state else ImpAttnConfig()
+        cfgd = dict(state.get("cfg", {}))
+        # checkpoints trained before the invariant-channel back-port have no
+        # such key and were built on the raw channels; defaulting them to
+        # True would silently mismatch the encoder/phi/psi widths
+        cfgd.setdefault("invariant", False)
+        cfg = ImpAttnConfig(**cfgd)
         inner = ImpedanceAttentionRegressor(cfg).to(torch.float64)
         inner.load_state_dict(state["model"]); inner.eval()
         for p in inner.parameters():

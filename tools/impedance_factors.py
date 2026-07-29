@@ -325,6 +325,32 @@ def invariant_channels(p: torch.Tensor, s: torch.Tensor, omegas) -> list:
     return out
 
 
+def invariant_factor_tensors(p: torch.Tensor, s: torch.Tensor, omegas):
+    """``(p, s)`` regrouped into invariant channels as stacked tensors.
+
+    Same regrouping as :func:`invariant_channels`, but returned as
+    ``[N, n_inv, 2m]`` so it is a drop-in replacement for the raw
+    ``[N, n_ch, m]`` pair. The DC channel is zero-padded from ``m`` to
+    ``2m``; zeros contribute nothing to any inner product, so every
+    downstream score is unchanged apart from consuming invariant
+    quantities.
+
+    Use this for the bilinear and kernel scores. The dynamic kernel takes
+    the un-padded list instead, because its degree-2 features scale with
+    channel width and padding DC to 2m would quadruple that block for no
+    information.
+    """
+    chans = invariant_channels(p, s, omegas)
+    wid = max(A.shape[-1] for A, _, _ in chans)
+    pa, sa = [], []
+    for A, B, _ in chans:
+        if A.shape[-1] < wid:
+            pad = A.new_zeros(A.shape[0], wid - A.shape[-1])
+            A, B = torch.cat([A, pad], -1), torch.cat([B, pad], -1)
+        pa.append(A); sa.append(B)
+    return torch.stack(pa, 1), torch.stack(sa, 1)
+
+
 def invariant_channel_count(omegas) -> int:
     """1 at DC + 2 (Re, Im) per non-zero frequency."""
     return sum(1 if float(w) == 0.0 else 2 for w in omegas)
