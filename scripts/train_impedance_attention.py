@@ -19,6 +19,28 @@ Ablations (the design note's forward-baseline table):
     python scripts/train_impedance_attention.py --compare-baseline \\
         checkpoints/droop_v7_edgeconv.pt --n-layers 7
 
+**Checkpoint selection is broken by default, and it is the dataset's
+fault, not the model's.** The val split holds out *samples* of the four
+training topologies; the test split holds out *topologies*. Measured over
+50 epochs (seed 0, three architectures):
+
+    arch        corr(val, OOD test)   best OOD epoch   val-selected OOD
+    bilinear          -0.290                1              +0.110
+    kernel n_rff=128  -0.138                2                 ...
+    kernel n_rff=512  -0.490                1                 ...
+
+Val climbs +0.675 -> +0.969 while held-out-topology test *falls*
++0.755 -> +0.117. Selecting on val costs 0.645 test R2 versus stopping at
+the OOD optimum. Every architecture shows it, so it is a property of the
+4-topology training set: 16k samples over 4 topologies lets the model
+memorise topology-specific structure long before it runs out of capacity.
+
+``--holdout-anchor`` buys an honest selection signal by excluding one
+training topology and selecting on it. It costs 25 % of the topological
+diversity, which on a 4-topology set is expensive. The real fix is more
+topologies with fewer samples each (dataset regeneration — the anchor
+lists live in ``tools/sampler.py``).
+
 Factor caching: factors depend on (topology, R, C, omega). With omega
 frozen they are constant per sample, so they are computed once and cached
 (2-44 ms/sample => ~12 min/epoch if recomputed every step). This does NOT
@@ -115,6 +137,14 @@ def load_split(h5_path, split):
             "wt": grp["ww_top_edges"][:], "wb": grp["ww_bot_edges"][:],
             "y": grp["peak_droop_loads"][:],
         }
+
+
+def filter_anchor(data, anchor, keep: bool):
+    """Subset ``data`` to (keep=True) or away from (keep=False) one anchor."""
+    sel = (data["n_top"] == anchor[0]) & (data["n_bot"] == anchor[1])
+    if not keep:
+        sel = ~sel
+    return {k: v[sel] for k, v in data.items()}
 
 
 def build_cache(data, ac, omegas, m, n_power, tag, cache_dir: Path | None,
@@ -247,6 +277,14 @@ def main() -> None:
     ap.add_argument("--n-layers", type=int, default=7)
     ap.add_argument("--conv-type", default="edgeconv")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--holdout-anchor", default=None, metavar="NT,NB",
+                    help="Exclude this topology from training and use it as "
+                         "the val/selection signal. Without it, val is "
+                         "held-out SAMPLES of trained topologies, which on "
+                         "this dataset is ANTI-correlated with held-out "
+                         "TOPOLOGY performance (r=-0.29 bilinear, -0.49 "
+                         "kernel512 over 50 epochs) — see the module "
+                         "docstring. Costs 25%% of topological diversity.")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
@@ -273,6 +311,16 @@ def main() -> None:
 
     tr, te = load_split(args.data, "train"), load_split(args.data, "test")
     va = load_split(args.data, "val")
+    if args.holdout_anchor:
+        ho = tuple(int(v) for v in args.holdout_anchor.split(","))
+        n_before = tr["n_top"].shape[0]
+        tr = filter_anchor(tr, ho, keep=False)      # never trained on
+        va = filter_anchor(va, ho, keep=True)       # selection signal only
+        print(f"topology holdout {ho}: train {n_before} -> "
+              f"{tr['n_top'].shape[0]}, val = {va['n_top'].shape[0]} samples "
+              f"of the held-out topology")
+        if va["n_top"].shape[0] == 0:
+            raise SystemExit(f"no val samples for anchor {ho}")
     if args.limit:
         tr = {k: v[:args.limit] for k, v in tr.items()}
         va = {k: v[:max(64, args.limit // 4)] for k, v in va.items()}
