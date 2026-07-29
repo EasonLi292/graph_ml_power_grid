@@ -422,7 +422,21 @@ def check_kernel_score():
         tay_bad |= (gm >= 1.0 and e_tay > 0.5)
         print(f"   {gm:>7.1f} {e_rff:>9.3f} {e_tay:>11.3f} "
               f"{(exact.max()/exact.min()).item():>14.1e}")
-    ok = ef < 1e-9 and eg < 1e-9 and tay_bad
+    # the vectorised _kernel_maps must equal the readable reference loop:
+    # it evaluates all (head, scale) pairs in one matmul, which is only
+    # legitimate because every pair shares the frozen basis w0
+    hs, _, _ = model.embed(x, p, s, sys_.n_elec)
+    fd = fdc.detach().clone().requires_grad_(True)
+    P1, S1 = model.attn._kernel_maps(hs, fd)
+    g1 = torch.autograd.grad((P1.sum() + S1.pow(2).sum()), fd, retain_graph=True)[0]
+    fd2 = fdc.detach().clone().requires_grad_(True)
+    P2, S2 = model.attn._kernel_maps_loop(hs, fd2)
+    g2 = torch.autograd.grad((P2.sum() + S2.pow(2).sum()), fd2)[0]
+    e_map = max((P1 - P2).abs().max().item(), (S1 - S2).abs().max().item())
+    e_mg = (g1 - g2).abs().max().item() / g1.abs().max().item()
+    print(f"   vectorised vs reference loop: maps {e_map:.2e}  grad {e_mg:.2e}")
+
+    ok = ef < 1e-9 and eg < 1e-9 and tay_bad and e_map == 0.0 and e_mg < 1e-9
     print("   (Taylor failing at large gamma is expected — it is why RFF is default)")
     print(OK if ok else BAD)
     return ok

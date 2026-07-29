@@ -86,19 +86,70 @@ restricted, and RFF adds approximation noise (≈0.13 absolute at D=128).
 How much of the 0.577 the deployed form actually reaches is what the
 synthetic training run and a follow-up IBM pass will show.
 
+## Choosing `n_rff` — measured, and the metric matters
+
+The trainer default was `n_rff=128`, inherited from check 8 which reports
+**max-abs** pairwise kernel error at D=64. That metric is the wrong one and
+it is pessimistic: at sharp `gamma` most true kernel values are ~0 and
+mutually indistinguishable, so ranking them is both hopeless and irrelevant.
+What the layer computes is `out_i = sum_j K_ij v_j`.
+
+Per-pair ranking (pessimistic) vs aggregated output, anchor (7,13), N=270,
+5 draws of the random basis, at the three gammas the model initialises to:
+
+| D | per-pair rank rho, g=1.70 | out rel-err, g=1.70 | node-order rho, g=1.70 |
+|---|---|---|---|
+| 128 | 0.70 | 0.356 | 0.926 |
+| 256 | 0.78 | 0.242 | 0.956 |
+| 512 | 0.84 | 0.175 | 0.978 |
+| 1024 | 0.88 | 0.136 | 0.985 |
+
+So the node ordering the repair loop consumes survives even at D=128, but
+the **magnitude** carries 26-36 % approximation noise there — and the
+sensitivity gate scores magnitude ratio. Since `kw` starts at zero (the
+kernel begins silent and the model learns how much to trust it), a noisy
+kernel would be learned *away*, and we would wrongly conclude the kernel
+does not help when it was the approximation failing. **D=512 is the run
+default** (rel-err halved, node order 0.98-0.99); a D=128 arm is trained
+alongside to measure the sensitivity directly rather than assume it.
+
+Error grows only mildly with N (rel-err 0.30 at N=79 vs 0.36 at N=270,
+g=1.70, D=128), which is the encouraging direction for IBM scale.
+
+### Orthogonal random features: tested, rejected
+
+Yu et al. 2016 orthogonalise the RFF directions (keeping chi-distributed
+lengths) and prove lower variance for the Gaussian kernel. It is a frozen
+buffer, so `gamma` would stay learnable. On this factor geometry it does
+not pay: rms 0.0711 -> 0.0555 at D=128/g=0.31, but essentially nothing
+where it is needed (0.0863 -> 0.0815 at g=1.70, rank rho 0.702 -> 0.708).
+The limitation is not direction correlation but the *absolute* error floor
+against tiny kernel values. Not adopted — no complexity added for it.
+
 ## Use
 
 ```bash
-# new kernel score
-python scripts/train_impedance_attention.py --score kernel --epochs 50 \
-    --ckpt checkpoints/imp_attn_kernel.pt
+# kernel score at the measured D (see above); D=128 arm quantifies D-sensitivity
+python scripts/train_impedance_attention.py --score kernel --n-rff 512 \
+    --epochs 50 --seed 0 --ckpt checkpoints/imp_attn_kernel512_s0.pt
 # unchanged bilinear baseline, same harness
 python scripts/train_impedance_attention.py --score bilinear --epochs 50 \
-    --ckpt checkpoints/imp_attn_bilinear.pt
-# gate both at 12 designs
+    --seed 0 --ckpt checkpoints/imp_attn_bilinear_s0.pt
+# gate at 12 designs
 python scripts/sensitivity_gate.py --arch impedance --n-designs 12 \
-    --ckpt checkpoints/imp_attn_kernel.pt --out docs/analysis/sensgate_kernel.json
+    --ckpt checkpoints/imp_attn_kernel512_s0.pt \
+    --out docs/analysis/sensgate_kernel512_s0.json
 ```
+
+Device: **CPU, not MPS** — measured 8 s vs 17 s per epoch on the same
+config. These are batch-1 graphs of 72-390 nodes; accelerator launch
+overhead dominates the arithmetic. A CUDA box will not change this much
+either; the useful axis is running seeds concurrently, not per-run speed.
+
+Factors are cached to `datasets/regular_v7_anchors/_factors` (9.0 GB for
+both scores, ~8 min to build, reused by every subsequent run and by every
+seed). Each training process then holds ~5 GB resident, so keep concurrency
+at 3 on a 24 GB machine.
 
 `--score kernel` adds one extra DC solve per sample to the factor cache
 (`_fdc` suffix in the cache key, so bilinear caches are not invalidated).
