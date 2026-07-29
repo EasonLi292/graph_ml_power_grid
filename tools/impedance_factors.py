@@ -146,7 +146,8 @@ def admittance(sys_: BranchSystem, R: torch.Tensor, C: torch.Tensor,
     return Y
 
 
-def _subspace_factors(Y: torch.Tensor, probes: torch.Tensor, n_power: int):
+def _subspace_factors(Y: torch.Tensor, probes: torch.Tensor, n_power: int,
+                      proj: str = "hermitian"):
     """Randomized subspace iteration -> (p, s) with ``p_i^T s_j ~= Z_ij``.
 
     Galerkin projection onto ``range(Qr)``: ``Z ~= Qr (Qr^H Z Qr) Qr^H``.
@@ -165,8 +166,29 @@ def _subspace_factors(Y: torch.Tensor, probes: torch.Tensor, n_power: int):
         X = torch.linalg.solve(Y, X)
     Qr, _ = torch.linalg.qr(X)
     ZQ = torch.linalg.solve(Y, Qr)
+
+    if proj == "complex_sym":
+        # Bilinear-form projection: T_s = Qr^T Z Qr is SYMMETRIC whenever Z
+        # is complex-symmetric, so Z ~= Qr T_s Qr^T is symmetric by
+        # construction and keeps width m. It is NOT a Galerkin projection
+        # (Qr^T Qr != I for a unitary Qr), so its accuracy is an open
+        # question the audit answers rather than assumes.
+        Ts = Qr.transpose(-2, -1) @ ZQ
+        return Qr, Qr @ Ts.transpose(-2, -1), Ts
+
     T = Qr.conj().transpose(-2, -1) @ ZQ          # [m, m] = Qr^H Z Qr
-    return Qr, Qr.conj() @ T.transpose(-2, -1), T
+    p, s = Qr, Qr.conj() @ T.transpose(-2, -1)    # Z ~= Qr T Qr^H
+
+    if proj == "symmetrized":
+        # Ẑ_sym = (Ẑ + Ẑ^T)/2, kept in factored form by concatenation:
+        #   Ẑ      = Qr T Qr^H          -> (Qr,        conj(Qr) T^T)
+        #   Ẑ^T    = conj(Qr) T^T Qr^T  -> (conj(Qr),  Qr T       )
+        # Width doubles to 2m; exactly symmetric for any rank.
+        p = torch.cat([Qr, Qr.conj()], -1)
+        s = 0.5 * torch.cat([Qr.conj() @ T.transpose(-2, -1), Qr @ T], -1)
+        return p, s, T
+
+    return p, s, T
 
 
 def symmetric_factor(Y: torch.Tensor, probes: torch.Tensor, n_power: int):
@@ -220,6 +242,7 @@ def impedance_factors(
     n_power: int = 2,
     L: torch.Tensor | None = None,
     seed: int = 0,
+    proj: str = "hermitian",
 ):
     """Per-frequency observer/source factors on the FULL node axis.
 
@@ -237,7 +260,7 @@ def impedance_factors(
     p_ch, s_ch = [], []
     for f in range(omegas.shape[0]):
         Y = admittance(sys_, R, C, omegas[f], L)
-        pf, sf, _ = _subspace_factors(Y, probes, n_power)
+        pf, sf, _ = _subspace_factors(Y, probes, n_power, proj=proj)
         if float(omegas[f]) == 0.0:
             p_ch += [pf.real]
             s_ch += [sf.real]
@@ -248,9 +271,11 @@ def impedance_factors(
     p_free = torch.stack(p_ch, 1).to(dt)      # [n_free, C_ch, m]
     s_free = torch.stack(s_ch, 1).to(dt)
 
-    n_ch = p_free.shape[1]
-    p_e = p_free.new_zeros((sys_.n_elec, n_ch, m))
-    s_e = s_free.new_zeros((sys_.n_elec, n_ch, m))
+    # width is m for the default projection but 2m for proj="symmetrized",
+    # so take it from the tensor rather than the requested rank
+    n_ch, wid = p_free.shape[1], p_free.shape[-1]
+    p_e = p_free.new_zeros((sys_.n_elec, n_ch, wid))
+    s_e = s_free.new_zeros((sys_.n_elec, n_ch, wid))
     live = sys_.free_of >= 0
     p_e[live] = p_free[sys_.free_of[live]]
     s_e[live] = s_free[sys_.free_of[live]]
