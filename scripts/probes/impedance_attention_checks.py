@@ -9,6 +9,10 @@ Runs the checks required by the design note:
   5  load orientation    swapping VDD/VSS terminals flips the factor
   6  no-n^2 / scaling    peak memory and runtime vs node count
   7  gradients           near R, far R, C, load features; autograd vs FD
+  8  kernel score        RFF factorized == naive; RFF vs exact Gaussian;
+                         Taylor divergence (why RFF is the default)
+  9  reweight vs reorder a scalar monotone f cannot change per-pair ranking
+                         but does change the aggregated output
 
     python scripts/probes/impedance_attention_checks.py
     python scripts/probes/impedance_attention_checks.py --only 6
@@ -207,9 +211,7 @@ def check_directionality():
     for lin in (model.attn.phi, model.attn.psi, model.attn.q, model.attn.k):
         lin.weight.data.copy_(torch.randn_like(lin.weight) * 0.3)
 
-    pn, sn = model.normalize_factors(p, s, sys_.n_elec)
-    selfz = (pn * sn).sum(-1).abs().sum(-1, keepdim=True).clamp_min(1e-30).log10()
-    h = model.encoder(torch.cat([x, selfz], -1))
+    h, pn, sn = model.embed(x, p, s, sys_.n_elec)
     N, H = h.shape[0], cfg.heads
     q = model.attn.q(h).view(N, H, cfg.d_qk)
     k = model.attn.k(h).view(N, H, cfg.d_qk)
@@ -264,9 +266,7 @@ def check_scaling():
         g, wt, wb = make_grid(nt, nb)
         sys_, p, s = factors_for(g, wt, wb, 2e-10, om, m=16)
         x = node_features(sys_, torch.tensor(g.loads, dtype=DT))
-        pn, sn = model.normalize_factors(p, s, sys_.n_elec)
-        selfz = (pn * sn).sum(-1).abs().sum(-1, keepdim=True).clamp_min(1e-30).log10()
-        h = model.encoder(torch.cat([x, selfz], -1))
+        h, pn, sn = model.embed(x, p, s, sys_.n_elec)
         N = h.shape[0]
         with torch.no_grad():
             model.attn(h, pn, sn)                      # warm up
@@ -376,14 +376,102 @@ def check_gradients():
     return allok
 
 
+# --------------------------------------------------------------- 8
+def check_kernel_score():
+    print("8. kernel score (RFF): factorization, fidelity, Taylor limits")
+    from tools.impedance_factors import dc_symmetric_factor
+    torch.manual_seed(0)
+    g, wt, wb = make_grid(3, 7)
+    om = torch.tensor([0.0, 2 * np.pi * FIXED_FREQ], dtype=DT)
+    sys_, p, s = factors_for(g, wt, wb, 2e-10, om, m=8)
+    R, C = knob_tensors(g, wt, wb, torch.tensor(2e-10, dtype=DT),
+                        FIXED_RSHEET_TOP, FIXED_RSHEET_BOT, FIXED_R_VIA)
+    fdc = dc_symmetric_factor(sys_, R, C, m=8, n_power=2)
+    x = node_features(sys_, torch.tensor(g.loads, dtype=DT))
+    cfg = ImpAttnConfig(n_freq=2, m_factor=8, hidden_dim=32, d_v=16,
+                        score="kernel", n_scales=2, n_rff=64)
+    model = ImpedanceAttentionRegressor(cfg).to(DT)
+    for prm in model.decoder.parameters():
+        prm.data.copy_(torch.randn_like(prm) * 0.1)
+    model.attn.kw.data.copy_(torch.randn_like(model.attn.kw) * 0.5)
+
+    pf = p.clone().requires_grad_(True)
+    yf = model(x, pf, s, sys_.n_elec, fdc=fdc); yf.sum().backward()
+    gf = pf.grad.clone()
+    pn = p.clone().requires_grad_(True)
+    yn = model(x, pn, s, sys_.n_elec, naive=True, fdc=fdc); yn.sum().backward()
+    gn = pn.grad.clone()
+    ef = (yf - yn).abs().max().item() / yn.abs().max().item()
+    eg = (gf - gn).abs().max().item() / gn.abs().max().item()
+    print(f"   factorized vs naive: output  {ef:.2e}")
+    print(f"   factorized vs naive: grad    {eg:.2e}")
+
+    # RFF approximates the Gaussian kernel it claims to; Taylor does not
+    fn = fdc / fdc.norm(dim=-1, keepdim=True).mean()
+    d2 = torch.cdist(fn, fn) ** 2
+    print(f"   {'gamma':>7} {'RFF err':>9} {'Taylor err':>11} {'kernel spread':>14}")
+    tay_bad = False
+    for gm in (0.1, 1.0, 10.0):
+        gmt = torch.tensor(gm, dtype=DT)
+        exact = torch.exp(-gm * d2)
+        z = model.attn._rff(fn, gmt)
+        e_rff = (z @ z.T - exact).abs().max().item()
+        zii = (fn * fn).sum(-1)
+        gt = model.attn._taylor(fn, gmt) * torch.exp(-gmt * zii).unsqueeze(-1)
+        e_tay = (gt @ gt.T - exact).abs().max().item() / exact.abs().max().item()
+        tay_bad |= (gm >= 1.0 and e_tay > 0.5)
+        print(f"   {gm:>7.1f} {e_rff:>9.3f} {e_tay:>11.3f} "
+              f"{(exact.max()/exact.min()).item():>14.1e}")
+    ok = ef < 1e-9 and eg < 1e-9 and tay_bad
+    print("   (Taylor failing at large gamma is expected — it is why RFF is default)")
+    print(OK if ok else BAD)
+    return ok
+
+
+# --------------------------------------------------------------- 9
+def check_reweight_vs_reorder():
+    print("9. reweight vs reorder (what a nonlinearity can and cannot do)")
+    torch.manual_seed(0)
+    g, wt, wb = make_grid(3, 7)
+    om = torch.zeros(1, dtype=DT)
+    sys_, p, s = factors_for(g, wt, wb, 2e-10, om, m=16)
+    L0 = sys_.n_elec
+    z = p[L0:][:, 0] @ s[L0:][:, 0].T          # load-to-load scores
+    v = torch.tensor(g.loads[:, 0] * g.loads[:, 2], dtype=DT)
+
+    from scipy.stats import spearmanr
+    base = z[0].numpy()
+    rhos, outs = [], []
+    for gm in (0.5, 2.0, 8.0):
+        f = torch.exp(-gm * (-z))              # monotone increasing in z
+        rhos.append(spearmanr(f[0].numpy(), base).statistic)
+        outs.append((f @ v)[0].item())
+    same_rank = min(rhos) > 0.999999
+    spread = max(outs) / min(outs)
+    print(f"   per-pair ranking under monotone f: spearman {min(rhos):.6f} "
+          f"({'unchanged' if same_rank else 'CHANGED'})")
+    print(f"   aggregated output sum_j f(z_ij) v_j varies by {spread:.1f}x")
+    # multivariate f (using the source's own self-impedance) CAN reorder
+    zjj = (p[L0:][:, 0] * s[L0:][:, 0]).sum(-1)
+    multi = z - 0.5 * zjj.unsqueeze(0)
+    rho_multi = spearmanr(multi[0].numpy(), base).statistic
+    print(f"   multivariate f (uses z_jj): spearman vs base {rho_multi:.4f} "
+          f"({'reorders' if rho_multi < 0.999 else 'no reorder'})")
+    ok = same_rank and spread > 1.5 and rho_multi < 0.999
+    print("   => a scalar monotone f reweights but cannot reorder; only the")
+    print("      multivariate route changes ranking. Both are in the design.")
+    print(OK if ok else BAD)
+    return ok
+
+
 CHECKS = [check_physics, check_naive_equivalence, check_permutation,
           check_directionality, check_load_orientation, check_scaling,
-          check_gradients]
+          check_gradients, check_kernel_score, check_reweight_vs_reorder]
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", type=int, default=None, help="run one check (1-7)")
+    ap.add_argument("--only", type=int, default=None, help="run one check (1-9)")
     args = ap.parse_args()
     todo = [CHECKS[args.only - 1]] if args.only else CHECKS
     results = []

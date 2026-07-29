@@ -47,6 +47,7 @@ from eason.impedance_attention_model import ImpAttnConfig, ImpedanceAttentionReg
 from tools.grid_construction import build_regular_pdn
 from tools.impedance_factors import (
     branch_system,
+    dc_symmetric_factor,
     impedance_factors,
     knob_tensors,
     node_features,
@@ -94,11 +95,15 @@ class AnchorCache:
             self.n_loads[a] = proto.n_loads
 
 
-def sample_factors(ac: AnchorCache, anchor, wt, wb, cd, omegas, m, n_power):
+def sample_factors(ac: AnchorCache, anchor, wt, wb, cd, omegas, m, n_power,
+                   want_fdc=False):
     g, s = ac.sys[anchor]
     R, C = knob_tensors(g, wt, wb, cd, FIXED_RSHEET_TOP, FIXED_RSHEET_BOT,
                         FIXED_R_VIA)
-    return impedance_factors(s, R, C, omegas, m=m, n_power=n_power)
+    p, sf = impedance_factors(s, R, C, omegas, m=m, n_power=n_power)
+    fdc = (dc_symmetric_factor(s, R, C, m=m, n_power=n_power)
+           if want_fdc else None)
+    return p, sf, fdc
 
 
 def load_split(h5_path, split):
@@ -112,12 +117,14 @@ def load_split(h5_path, split):
         }
 
 
-def build_cache(data, ac, omegas, m, n_power, tag, cache_dir: Path | None):
+def build_cache(data, ac, omegas, m, n_power, tag, cache_dir: Path | None,
+                want_fdc: bool = False):
     """Precompute (p, s) per sample. Cached to disk keyed by config."""
     # channel count is part of the key: the AC-channel fix changed the layout
     # and a stale cache would load silently with the wrong shape
     from tools.impedance_factors import channel_count
-    key = f"{tag}_m{m}_q{n_power}_f{omegas.numel()}_c{channel_count(omegas)}"
+    key = (f"{tag}_m{m}_q{n_power}_f{omegas.numel()}"
+           f"_c{channel_count(omegas)}{'_fdc' if want_fdc else ''}")
     path = cache_dir / f"{key}.pt" if cache_dir else None
     if path is not None and path.exists():
         print(f"  factors <- {path}")
@@ -128,13 +135,14 @@ def build_cache(data, ac, omegas, m, n_power, tag, cache_dir: Path | None):
         a = (int(data["n_top"][i]), int(data["n_bot"][i]))
         g, s = ac.sys[a]
         te, be = g.top_edges.shape[0], g.bot_edges.shape[0]
-        p, q_ = sample_factors(
+        p, q_, fdc = sample_factors(
             ac, a,
             torch.tensor(data["wt"][i, :te], dtype=FDT),
             torch.tensor(data["wb"][i, :be], dtype=FDT),
             torch.tensor(float(data["gp"][i, 1]), dtype=FDT),
-            omegas, m, n_power)
-        out.append((p.to(DT), q_.to(DT)))
+            omegas, m, n_power, want_fdc=want_fdc)
+        out.append((p.to(DT), q_.to(DT),
+                    fdc.to(DT) if fdc is not None else None))
         if (i + 1) % 500 == 0:
             el = time.time() - t0
             print(f"  {i+1}/{n} ({el:.0f}s, {el/(i+1)*1e3:.1f} ms/sample)")
@@ -171,8 +179,9 @@ def evaluate(model, data, facs, ac, device):
         for i in range(data["n_top"].shape[0]):
             a = (int(data["n_top"][i]), int(data["n_bot"][i]))
             _, s = ac.sys[a]
-            p, sf = facs[i]
-            y = model(ac.x[a].to(device), p.to(device), sf.to(device), s.n_elec)
+            p, sf, fdc = facs[i]
+            y = model(ac.x[a].to(device), p.to(device), sf.to(device), s.n_elec,
+                      fdc=None if fdc is None else fdc.to(device))
             nl = ac.n_loads[a]
             t = np.log10(np.maximum(data["y"][i, :nl], LOG_FLOOR))
             preds.append(y.cpu())
@@ -219,6 +228,10 @@ def main() -> None:
     ap.add_argument("--n-freq", type=int, default=3)
     ap.add_argument("--m-factor", type=int, default=16)
     ap.add_argument("--n-power", type=int, default=2)
+    ap.add_argument("--score", default="bilinear",
+                    choices=["bilinear", "kernel"])
+    ap.add_argument("--n-scales", type=int, default=3)
+    ap.add_argument("--n-rff", type=int, default=128)
     ap.add_argument("--hidden-dim", type=int, default=64)
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--epochs", type=int, default=50)
@@ -253,6 +266,7 @@ def main() -> None:
             "path assumes frozen omega. Run with frozen omega for the "
             "prototype (see the design note's unresolved item 2).")
 
+    want_fdc = args.score == "kernel"
     ac = AnchorCache()
     omegas = default_omegas(args.n_freq)
     print(f"omegas (rad/s): {[f'{float(w):.3e}' for w in omegas]}")
@@ -266,19 +280,20 @@ def main() -> None:
           f"| test {te['n_top'].shape[0]}")
     print("precomputing factors (train)")
     f_tr = build_cache(tr, ac, omegas, args.m_factor, args.n_power,
-                       f"train{args.limit or ''}", args.cache_dir)
+                       f"train{args.limit or ''}", args.cache_dir, want_fdc)
     print("precomputing factors (val)")
     f_va = build_cache(va, ac, omegas, args.m_factor, args.n_power,
-                       f"val{args.limit or ''}", args.cache_dir)
+                       f"val{args.limit or ''}", args.cache_dir, want_fdc)
     print("precomputing factors (test)")
     f_te = build_cache(te, ac, omegas, args.m_factor, args.n_power,
-                       "test", args.cache_dir)
+                       "test", args.cache_dir, want_fdc)
 
     cfg = ImpAttnConfig(
         hidden_dim=args.hidden_dim, heads=args.heads, n_freq=args.n_freq,
         m_factor=args.m_factor,
         content=args.ablation in ("combined", "content"),
-        impedance=args.ablation in ("combined", "impedance"))
+        impedance=args.ablation in ("combined", "impedance"),
+        score=args.score, n_scales=args.n_scales, n_rff=args.n_rff)
     # start at the mean-predictor baseline (see model init docstring)
     ymask = np.isfinite(tr["y"]) & (tr["y"] > 0)
     init_bias = float(np.log10(np.maximum(tr["y"][ymask], LOG_FLOOR)).mean())
@@ -298,9 +313,10 @@ def main() -> None:
         for i in rng.permutation(n):
             a = (int(tr["n_top"][i]), int(tr["n_bot"][i]))
             _, s = ac.sys[a]
-            p, sf = f_tr[i]
+            p, sf, fdc = f_tr[i]
             pred = model(ac.x[a].to(args.device), p.to(args.device),
-                         sf.to(args.device), s.n_elec)
+                         sf.to(args.device), s.n_elec,
+                         fdc=None if fdc is None else fdc.to(args.device))
             nl = ac.n_loads[a]
             t = torch.tensor(
                 np.log10(np.maximum(tr["y"][i, :nl], LOG_FLOOR)),

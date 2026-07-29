@@ -166,7 +166,33 @@ def _subspace_factors(Y: torch.Tensor, probes: torch.Tensor, n_power: int):
     Qr, _ = torch.linalg.qr(X)
     ZQ = torch.linalg.solve(Y, Qr)
     T = Qr.conj().transpose(-2, -1) @ ZQ          # [m, m] = Qr^H Z Qr
-    return Qr, Qr.conj() @ T.transpose(-2, -1)
+    return Qr, Qr.conj() @ T.transpose(-2, -1), T
+
+
+def symmetric_factor(Y: torch.Tensor, probes: torch.Tensor, n_power: int):
+    """Symmetric factor ``F`` with ``F_i . F_j ~= Z_ij`` for real SPD ``Y``.
+
+    The asymmetric ``(p, s)`` pair reconstructs ``Z`` but does not make
+    ``z_ii + z_jj - 2 z_ij`` a Euclidean distance, which random Fourier
+    features require. Since ``Z`` is symmetric PSD at DC, ``T = Qr^T Z Qr``
+    is too, so ``F = Qr T^{1/2}`` gives both
+
+        F_i . F_j       = Z_ij
+        ||F_i - F_j||^2 = Z_ii + Z_jj - 2 Z_ij = R_eff(i, j)
+
+    Real DC only — at ``w > 0`` ``T`` is complex symmetric, not PSD, and
+    has no real square root.
+    """
+    _, _, T = _subspace_factors(Y, probes, n_power)
+    Tr = T.real if T.is_complex() else T
+    Tr = 0.5 * (Tr + Tr.transpose(-2, -1))
+    evals, evecs = torch.linalg.eigh(Tr)
+    root = evecs @ torch.diag_embed(evals.clamp_min(0).sqrt()) @ evecs.transpose(-2, -1)
+    X = torch.linalg.solve(Y, probes.to(Y.dtype))
+    for _ in range(n_power):
+        X = torch.linalg.solve(Y, X)
+    Qr, _ = torch.linalg.qr(X)
+    return (Qr.real if Qr.is_complex() else Qr) @ root
 
 
 def channel_count(omegas) -> int:
@@ -211,7 +237,7 @@ def impedance_factors(
     p_ch, s_ch = [], []
     for f in range(omegas.shape[0]):
         Y = admittance(sys_, R, C, omegas[f], L)
-        pf, sf = _subspace_factors(Y, probes, n_power)
+        pf, sf, _ = _subspace_factors(Y, probes, n_power)
         if float(omegas[f]) == 0.0:
             p_ch += [pf.real]
             s_ch += [sf.real]
@@ -231,6 +257,27 @@ def impedance_factors(
 
     p_l, s_l = load_factors(sys_, p_e, s_e)
     return torch.cat([p_e, p_l], 0), torch.cat([s_e, s_l], 0)
+
+
+def dc_symmetric_factor(sys_: BranchSystem, R: torch.Tensor, C: torch.Tensor,
+                        m: int = 16, n_power: int = 2, seed: int = 0):
+    """DC symmetric factor on the FULL node axis (loads = oriented difference).
+
+    ``F_i . F_j ~= Z_ij`` and ``||F_i - F_j||^2 ~= R_eff(i, j)``, so a
+    Gaussian kernel of this distance can be approximated by random Fourier
+    features. Clamped pads are zero, as elsewhere.
+    """
+    dev, dt = R.device, R.dtype
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    probes = torch.randn(sys_.n_free, m, generator=gen,
+                         dtype=torch.float64).to(device=dev, dtype=dt)
+    Y = admittance(sys_, R, C, torch.zeros((), dtype=dt, device=dev))
+    F = symmetric_factor(Y, probes, n_power).to(dt)
+    out = F.new_zeros((sys_.n_elec, F.shape[1]))
+    live = sys_.free_of >= 0
+    out[live] = F[sys_.free_of[live]]
+    a, b = sys_.load_terminals[:, 0], sys_.load_terminals[:, 1]
+    return torch.cat([out, out[a] - out[b]], 0)
 
 
 def load_factors(sys_: BranchSystem, p_e: torch.Tensor, s_e: torch.Tensor):
