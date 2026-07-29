@@ -265,8 +265,10 @@ def main() -> None:
                     default=Path("datasets/regular_v7_anchors/dataset.h5"))
     ap.add_argument("--ckpt", type=Path,
                     default=Path("checkpoints/imp_attn.pt"))
-    ap.add_argument("--cache-dir", type=Path,
-                    default=Path("datasets/regular_v7_anchors/_factors"))
+    ap.add_argument("--cache-dir", type=Path, default=None,
+                    help="default: <dir of --data>/_factors, so switching "
+                         "datasets cannot silently reuse another dataset's "
+                         "factors")
     ap.add_argument("--ablation", default="combined",
                     choices=["combined", "content", "impedance"])
     ap.add_argument("--n-freq", type=int, default=3)
@@ -347,15 +349,23 @@ def main() -> None:
         va = {k: v[:max(64, args.limit // 4)] for k, v in va.items()}
     print(f"train {tr['n_top'].shape[0]} | val {va['n_top'].shape[0]} "
           f"| test {te['n_top'].shape[0]}")
+    # The cache key must encode anything that changes WHICH samples are in
+    # a split, or a holdout run silently loads the no-holdout cache and
+    # trains on rows it was supposed to have never seen. Same reason the
+    # cache dir follows --data rather than defaulting to one dataset.
+    cache_dir = args.cache_dir or args.data.parent / "_factors"
+    ho_tag = ("_ho" + "-".join(f"{a}x{b}" for a, b in sorted(hos))
+              if args.holdout_anchor else "")
+    print(f"factor cache: {cache_dir}")
     print("precomputing factors (train)")
     f_tr = build_cache(tr, ac, omegas, args.m_factor, args.n_power,
-                       f"train{args.limit or ''}", args.cache_dir, want_fdc)
+                       f"train{args.limit or ''}{ho_tag}", cache_dir, want_fdc)
     print("precomputing factors (val)")
     f_va = build_cache(va, ac, omegas, args.m_factor, args.n_power,
-                       f"val{args.limit or ''}", args.cache_dir, want_fdc)
+                       f"val{args.limit or ''}{ho_tag}", cache_dir, want_fdc)
     print("precomputing factors (test)")
     f_te = build_cache(te, ac, omegas, args.m_factor, args.n_power,
-                       "test", args.cache_dir, want_fdc)
+                       "test", cache_dir, want_fdc)
 
     cfg = ImpAttnConfig(
         hidden_dim=args.hidden_dim, heads=args.heads, n_freq=args.n_freq,
