@@ -71,6 +71,17 @@ class ImpAttnConfig:
     # sensitivities even at exact rank (docs/FACTOR_STABILITY_AUDIT.md).
     # False reproduces every pre-back-port checkpoint.
     invariant: bool = True
+    # Divide each frequency's factors by its own invariant impedance scale
+    # s_w = sqrt(mean_loads |Z_ii(w)|^2), so no frequency dominates the score
+    # for purely numerical reasons. Per-node, O(N), differentiable, and
+    # factorization-preserving (see _normalize_per_frequency).
+    freq_norm: bool = True
+    # "frob" = RMS entry of Z over all pairs via two [d,d] Grams (O(N d^2),
+    # never [N,N]); "diag" = mean squared self-impedance over load nodes.
+    # Measured: "diag" fails to align the off-diagonal ranges it targets,
+    # because diagonal impedance falls faster with omega than off-diagonal
+    # does. See docs/analysis/freq_norm_audit.json.
+    freq_norm_mode: str = "frob"
 
 
 class ImpedanceAttention(nn.Module):
@@ -373,10 +384,11 @@ class DynamicKernelAttention(nn.Module):
         h, H, K = cfg.hidden_dim, cfg.heads, cfg.max_degree
         self.n_ch, self.K = len(dims), K
         # feature width of each (channel, degree) block
-        widths = []
-        for d in dims:
+        widths, self._block_index = [], []
+        for ci, d in enumerate(dims):
             for k in range(K + 1):
                 widths.append(1 if k == 0 else (d if k == 1 else d * (d + 1) // 2))
+                self._block_index.append((ci, k))    # (channel, degree)
         self.widths = widths
         self.n_blocks = len(widths)
         self.register_buffer(
@@ -390,13 +402,29 @@ class DynamicKernelAttention(nn.Module):
         self.out = nn.Linear(H * cfg.d_v, h)
         self.norm = nn.LayerNorm(h)
 
-        # Signed per-head mixture over (channel, degree). Heads get
-        # different initial scales purely to break symmetry — no head is
-        # assigned a physical role, and no diversity loss is applied.
-        scales = torch.logspace(-1.0, 0.0, H).view(H, 1)
+        # Signed per-head mixture over (channel, degree), initialised AT THE
+        # PHYSICS rather than at arbitrary scales:
+        #   * DC, degree 1  -> 1.0   = ordinary superposition, droop = sum Z_ij I_j
+        #   * Re/Im, degree 2 -> equal per frequency = |Z(w)|^2, the magnitude
+        #     of the influence coefficient across several frequencies
+        #   * everything else small
+        # This is a STARTING POINT, not a constraint: alpha is fully
+        # learnable and signed, so training moves off it freely. Comparing a
+        # trained alpha against this pattern is how we read out which
+        # frequency mixture the data actually wanted.
+        #
+        # Heads all start on the same pattern with different overall gains,
+        # so symmetry is broken without assigning any head a role.
+        base = torch.full((self.n_blocks,), 0.05)
+        for b, (c, k) in enumerate(self._block_index):
+            if c == 0 and k == 1:
+                base[b] = 1.0                      # DC superposition
+            elif c > 0 and k == 2:
+                base[b] = 1.0                      # |Z(w)|^2, Re/Im tied
+        scales = torch.logspace(-0.5, 0.0, H).view(H, 1)
         self.alpha = nn.Parameter(
-            scales * torch.ones(H, self.n_blocks)
-            + 0.05 * torch.randn(H, self.n_blocks))
+            scales * base.view(1, -1)
+            + 0.02 * torch.randn(H, self.n_blocks))
         nn.init.zeros_(self.phi.weight); nn.init.ones_(self.phi.bias)
         nn.init.zeros_(self.psi.weight); nn.init.ones_(self.psi.bias)
 
@@ -526,9 +554,92 @@ class ImpedanceAttentionRegressor(nn.Module):
             scale = diag.sqrt()
             p, s = p / scale, s / scale
         chans = invariant_channels(p, s, self._omegas_layout)
+
+        # Self-impedance for the ENCODER is taken before per-frequency
+        # normalisation, so the model keeps the absolute impedance level
+        # (which carries grid size and operating point). Only the factors
+        # handed to the kernel are made dimensionless.
         selfz = torch.stack([(A * B).sum(-1) for A, B, _ in chans], -1)
         selfz = selfz.abs().clamp_min(1e-30).log10()
+
+        if self.cfg.freq_norm:
+            chans = self._normalize_per_frequency(chans, n_elec)
         return self.encoder(torch.cat([x, selfz], -1)), chans
+
+    @staticmethod
+    def _frob_scale(A, B, eps=1e-30):
+        """RMS entry of Z over ALL pairs, without forming ``[N, N]``.
+
+        ``Z = A B^T``, so ``||Z||_F^2 = tr(A^T A . B^T B)`` — two ``[d, d]``
+        Gram matrices, O(N d^2 + d^3). Dividing by ``N^2`` gives the mean
+        squared entry, which is size-normalised.
+
+        This is the scale that matters: the *off-diagonal* entries are what
+        enter the score, and measurement showed the diagonal does not track
+        them across frequency (diagonal impedance falls faster with omega
+        than off-diagonal does, so diagonal normalisation over-corrects and
+        can anti-align the ranges it was meant to align).
+        """
+        N = A.shape[0]
+        f2 = (A.transpose(-2, -1) @ A * (B.transpose(-2, -1) @ B)).sum()
+        return (f2.abs() / (N * N)).clamp_min(eps).sqrt()
+
+    def _normalize_per_frequency(self, chans, n_elec: int, eps: float = 1e-30):
+        """Divide each frequency's factors by its own impedance scale.
+
+            s_w^2 = mean_{i in loads} |Z_ii(w)|^2
+
+        Rationale: features at different frequencies differ by orders of
+        magnitude in raw units, so without this a single frequency dominates
+        the score for purely numerical reasons.
+
+        Properties, all required:
+        * **basis-invariant** — ``Z_ii`` is a diagonal entry of ``Z``, so it
+          is independent of the factor basis (unlike a raw AC channel).
+        * **per-node, never a pair matrix** — computed from ``A_i . B_i``,
+          O(N) and no ``[N, N]`` anywhere.
+        * **differentiable** in R and C through the factors.
+        * **size-independent** — a mean over load nodes, not a sum, and
+          dividing by the mean self-impedance removes the growth of
+          absolute impedance with grid size.
+        * **per frequency** — the Re and Im channels of one frequency share
+          one scale, since they are one physical frequency.
+        * **factorization-preserving** — scaling only the observer factor
+          ``A`` by a scalar leaves every degree an inner product, and makes
+          degree ``k`` scale as ``(Z/s)^k``, i.e. dimensionless at every
+          degree from a single scalar.
+        """
+        if len(chans) == 0 or chans[0][0].shape[0] <= n_elec:
+            return chans
+        mode = self.cfg.freq_norm_mode
+        out, c = [], 0
+        while c < len(chans):
+            if c == 0:                                  # DC: Z_ii real
+                A, B, nm = chans[0]
+                if mode == "diag":
+                    s_w = (((A[n_elec:] * B[n_elec:]).sum(-1)) ** 2
+                           ).mean().clamp_min(eps).sqrt()
+                else:
+                    s_w = self._frob_scale(A, B, eps)
+                out.append((A / s_w, B, nm))
+                c += 1
+            else:                                       # Re/Im of one freq
+                Ar, Br, nr = chans[c]
+                Ai, Bi, ni = chans[c + 1]
+                if mode == "diag":
+                    re = (Ar[n_elec:] * Br[n_elec:]).sum(-1)
+                    im = (Ai[n_elec:] * Bi[n_elec:]).sum(-1)
+                    s_w = (re ** 2 + im ** 2).mean().clamp_min(eps).sqrt()
+                else:
+                    # one scale per FREQUENCY, shared by its Re and Im
+                    # channels, since they are one physical frequency
+                    s_w = (self._frob_scale(Ar, Br, eps) ** 2
+                           + self._frob_scale(Ai, Bi, eps) ** 2
+                           ).clamp_min(eps).sqrt()
+                out.append((Ar / s_w, Br, nr))
+                out.append((Ai / s_w, Bi, ni))
+                c += 2
+        return out
 
     def forward(self, x, p, s, n_elec: int, naive: bool = False, fdc=None):
         """x [N, F]; p, s [N, n_ch, m]; loads are rows [n_elec:].
