@@ -1,0 +1,29 @@
+omegas (rad/s): ['0.000e+00', '5.620e+09', '2.810e+10']
+topology holdout [(7, 19), (10, 19), (19, 19)]: train 12000 -> 8487, val = 690 samples of the held-out topologies
+train 8487 | val 690 | test 2400
+factor cache: datasets/regular_v8_topo/_factors
+precomputing factors (train)
+  500/8487 (4499s, 8998.2 ms/sample)
+  1000/8487 (4890s, 4890.2 ms/sample)
+  1500/8487 (5268s, 3511.9 ms/sample)
+  2000/8487 (5602s, 2801.0 ms/sample)
+  2500/8487 (5936s, 2374.6 ms/sample)
+  3000/8487 (6265s, 2088.3 ms/sample)
+  3500/8487 (6629s, 1893.9 ms/sample)
+  4000/8487 (6962s, 1740.4 ms/sample)
+  4500/8487 (7315s, 1625.5 ms/sample)
+  5000/8487 (7629s, 1525.9 ms/sample)
+  5500/8487 (7969s, 1448.9 ms/sample)
+  6000/8487 (8331s, 1388.5 ms/sample)
+  6500/8487 (8620s, 1326.2 ms/sample)
+  7000/8487 (8958s, 1279.7 ms/sample)
+  7500/8487 (9279s, 1237.2 ms/sample)
+  8000/8487 (9628s, 1203.5 ms/sample)
+  factors -> datasets/regular_v8_topo/_factors/train_ho7x19-10x19-19x19_m16_q2_f3_c9_fdc.pt
+precomputing factors (val)
+  500/690 (188s, 376.4 ms/sample)
+  factors -> datasets/regular_v8_topo/_factors/val_ho7x19-10x19-19x19_m16_q2_f3_c9_fdc.pt
+precomputing factors (test)
+  factors <- datasets/regular_v8_topo/_factors/test_m16_q2_f3_c9_fdc.pt
+init bias (mean log10 droop): -3.211
+ablation=combined | params 33,673
