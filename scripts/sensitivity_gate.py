@@ -72,7 +72,17 @@ F_COL = EDGE_ATTR_COLS.index("freq")
 D_COL = EDGE_ATTR_COLS.index("duty")
 P_COL = EDGE_ATTR_COLS.index("phase")
 
-SIM_DELTA_FLOOR = 1e-4   # |sim Δ|/droop below this: excluded (solver noise)
+# |sim Δ|/droop below this: excluded. NOT solver noise — the transient sim
+# is deterministic and reruns of an identical input agree to exactly 0.0e+00
+# (measured at (4,7), (7,13), (11,31)). The old 1e-4 value was mislabelled
+# and was discarding real physics: single-edge response shrinks with grid
+# size (median 1.6e-4 at (4,7), 4.9e-6 at (7,13), 2.4e-7 at (11,31)), so on
+# the large anchors 1e-4 excluded essentially everything — 0/12 live at
+# (11,31) vs 9/12 at 1e-7. The floor exists only to drop edges with NO
+# effect on the worst load (exact zeros do occur: an edge far from the
+# peak-drooping load), so it belongs just above zero, not at a magnitude
+# where real responses live.
+SIM_DELTA_FLOOR = 1e-6
 
 
 def _wilson(k: int, n: int, z: float = 1.96):
@@ -186,11 +196,25 @@ def sim_worst(n_top, n_bot, ww_top, ww_bot, C_decap, n_loads):
 
 
 def gate_anchor(model, n_top, n_bot, n_designs, k_bot, k_top, delta_ww,
-                rng, verbose=True):
+                rng, verbose=True, k_frac=None):
     from scipy.stats import spearmanr
 
     g = build_regular_pdn(n_top=n_top, n_bot=n_bot)
     n_tp, n_bp = g.top_edges.shape[0], g.bot_edges.shape[0]
+    if k_frac is not None:
+        # Test a fixed FRACTION of each layer's edges, so the *coverage* of
+        # the ranking estimate is comparable across anchors spanning 79 to
+        # 2232 nodes (k_bot=12 is 17 % of (4,7)'s 70 bot edges but 0.8 % of
+        # (11,31)'s 1550).
+        #
+        # This does NOT make individual perturbations stronger — each site
+        # is still one edge — so it is not the fix for low live counts;
+        # lowering SIM_DELTA_FLOOR is. And it is expensive: cost is
+        # O(k x n_designs) simulations AND autograd factor rebuilds, so
+        # k_frac=0.15 at (11,31) means 250 sites per design. Use small
+        # values or absolute k on the large anchors.
+        k_bot = max(1, int(round(k_frac * n_bp)))
+        k_top = max(1, int(round(k_frac * n_tp)))
     cd_p = GLOBAL_RANGES.by_name("C_decap")
 
     rows = []
@@ -296,6 +320,15 @@ def main():
                          "cheap default (~25 s for 3 anchors)")
     ap.add_argument("--k-bot", type=int, default=12, help="bot strap edges perturbed")
     ap.add_argument("--k-top", type=int, default=6, help="top strap edges perturbed")
+    ap.add_argument("--k-frac", type=float, default=None,
+                    help="test this FRACTION of each layer's edges instead "
+                         "of the absolute --k-bot/--k-top, so ranking "
+                         "COVERAGE is comparable across anchors. It does "
+                         "not strengthen individual perturbations and is "
+                         "not the fix for low live counts (that is "
+                         "SIM_DELTA_FLOOR). Cost is O(k x n_designs) sims "
+                         "and factor rebuilds -- 0.15 at (11,31) is 250 "
+                         "sites per design.")
     ap.add_argument("--delta-ww", type=float, default=0.25, help="width step (+25%%)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=Path, default=None)
@@ -334,7 +367,8 @@ def main():
     for a in args.anchors:
         nt, nb = (int(v) for v in a.split(","))
         res, _ = gate_anchor(model, nt, nb, args.n_designs, args.k_bot,
-                             args.k_top, args.delta_ww, rng)
+                             args.k_top, args.delta_ww, rng,
+                             k_frac=args.k_frac)
         results.append(res)
 
     print(f"\n{'anchor':>8} | {'sign (95% CI)':>20} | {'rank-rho (95% CI)':>24} | "
@@ -356,7 +390,8 @@ def main():
             {"ckpt": str(args.ckpt), "conv_type": args.conv_type,
              "hidden_dim": args.hidden_dim, "n_layers": args.n_layers,
              "delta_ww": args.delta_ww, "n_designs": args.n_designs,
-             "k_bot": args.k_bot, "k_top": args.k_top, "seed": args.seed,
+             "k_bot": args.k_bot, "k_top": args.k_top,
+            "k_frac": args.k_frac, "seed": args.seed,
              "results": results}, indent=2))
         print(f"→ {args.out}")
 
