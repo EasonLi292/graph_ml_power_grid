@@ -178,6 +178,29 @@ class ImpedanceAdapter:
         return (10.0 ** self.model(x, p, sf, s.n_elec, fdc=fdc)).max()
 
 
+def strap_groups(edges: np.ndarray, n: int) -> list[np.ndarray]:
+    """Edge indices grouped into column straps (vertical edges only).
+
+    Node index is ``r*n + c``, so an edge (i, j) is vertical iff
+    ``j - i == n``, and its column is ``i % n``. One group = one full
+    power strap running the height of the die.
+
+    This is the unit a designer actually turns. A single edge is one
+    segment of one strap, and on a large die its effect on global worst
+    droop is ~1e-7 relative — real, but far below what any surrogate can
+    resolve and far below what repair cares about. Widening a whole strap
+    is both a legal repair move and a perturbation whose magnitude does
+    not vanish as the die grows.
+    """
+    src, dst = edges[:, 0], edges[:, 1]
+    vert = (dst - src) == n
+    col = src % n
+    groups: dict[int, list[int]] = {}
+    for idx in np.nonzero(vert)[0]:
+        groups.setdefault(int(col[idx]), []).append(int(idx))
+    return [np.asarray(v, dtype=int) for _, v in sorted(groups.items())]
+
+
 def model_worst(model, g, ww_top, ww_bot, C_decap):
     if isinstance(model, ImpedanceAdapter):
         return model(g, ww_top, ww_bot, C_decap)
@@ -196,7 +219,7 @@ def sim_worst(n_top, n_bot, ww_top, ww_bot, C_decap, n_loads):
 
 
 def gate_anchor(model, n_top, n_bot, n_designs, k_bot, k_top, delta_ww,
-                rng, verbose=True, k_frac=None):
+                rng, verbose=True, k_frac=None, unit="edge"):
     from scipy.stats import spearmanr
 
     g = build_regular_pdn(n_top=n_top, n_bot=n_bot)
@@ -232,19 +255,31 @@ def gate_anchor(model, n_top, n_bot, n_designs, k_bot, k_top, delta_ww,
         grad_top, grad_bot = wt_g.grad.numpy(), wb_g.grad.numpy()
         base_model = float(w0.detach())
 
-        edges = ([("bot", int(e)) for e in rng.choice(n_bp, min(k_bot, n_bp), replace=False)]
-                 + [("top", int(e)) for e in rng.choice(n_tp, min(k_top, n_tp), replace=False)])
-        for tier, e in edges:
+        if unit == "strap":
+            g_bot, g_top = strap_groups(g.bot_edges, n_bot), strap_groups(g.top_edges, n_top)
+            sites = ([("bot", g_bot[i]) for i in
+                      rng.choice(len(g_bot), min(k_bot, len(g_bot)), replace=False)]
+                     + [("top", g_top[i]) for i in
+                        rng.choice(len(g_top), min(k_top, len(g_top)), replace=False)])
+        else:
+            sites = ([("bot", np.array([int(e)])) for e in
+                      rng.choice(n_bp, min(k_bot, n_bp), replace=False)]
+                     + [("top", np.array([int(e)])) for e in
+                        rng.choice(n_tp, min(k_top, n_tp), replace=False)])
+        for tier, idx in sites:
             wt2, wb2 = wt.copy(), wb.copy()
-            (wt2 if tier == "top" else wb2)[e] *= (1.0 + delta_ww)
+            (wt2 if tier == "top" else wb2)[idx] *= (1.0 + delta_ww)
             with torch.no_grad():
                 dm = float(model_worst(model, g, torch.from_numpy(wt2).float(),
                                        torch.from_numpy(wb2).float(), cd)) - base_model
             ds = sim_worst(n_top, n_bot, wt2, wb2, cd, g.n_loads) - base_sim
-            glin = (grad_top if tier == "top" else grad_bot)[e] * \
-                   ((wt2 if tier == "top" else wb2)[e] - (wt if tier == "top" else wb)[e])
-            rows.append(dict(design=d_i, kind=f"ww_{tier}", edge=e,
-                             d_model=dm, d_sim=ds, d_lin=float(glin),
+            gr = (grad_top if tier == "top" else grad_bot)[idx]
+            dw = ((wt2 if tier == "top" else wb2)[idx]
+                  - (wt if tier == "top" else wb)[idx])
+            glin = float(np.dot(gr, dw))
+            rows.append(dict(design=d_i, kind=f"ww_{tier}", edge=int(idx[0]),
+                             n_edges=int(idx.size),
+                             d_model=dm, d_sim=ds, d_lin=glin,
                              base_sim=base_sim))
         for fac in (2.0, 0.5):
             with torch.no_grad():
@@ -270,14 +305,26 @@ def gate_anchor(model, n_top, n_bot, n_designs, k_bot, k_top, delta_ww,
         ln = np.array([r["d_lin"] for r in sub])
         lin_errs.append(float(np.median(np.abs(ln - fd) / (np.abs(fd) + 1e-12))))
     ratios = [abs(r["d_model"]) / abs(r["d_sim"]) for r in live]
+    # Null baseline the gate never reported: what a CONSTANT sign predictor
+    # scores. Widening is not reliably good -- measured base rate 0.44-0.54
+    # across anchors -- so the majority class is only ~0.54 accurate. A
+    # learned derivative must beat that to have earned anything.
+    helps = [r["d_sim"] < 0 for r in live]
+    base_rate = float(np.mean(helps)) if helps else float("nan")
+    majority = max(base_rate, 1.0 - base_rate) if helps else float("nan")
     sign_lo, sign_hi = _wilson(int(np.sum(sign_ok)), len(sign_ok)) if sign_ok else (None, None)
     rho_lo, rho_hi = _boot_ci(rhos)
     out = {
         "anchor": [n_top, n_bot],
         "n_designs": n_designs,
         "n_ww_perturb": len(ww), "n_ww_live": len(live),
+        "perturb_unit": unit,
         "ww_sign_acc": float(np.mean(sign_ok)) if sign_ok else None,
         "ww_sign_ci95": [sign_lo, sign_hi],
+        "ww_sign_base_rate_helps": base_rate,
+        "ww_sign_majority_baseline": majority,
+        "ww_sign_lift_over_majority": (float(np.mean(sign_ok)) - majority
+                                       if sign_ok else None),
         "site_rank_spearman_mean": float(np.mean(rhos)),
         "site_rank_spearman_ci95": [rho_lo, rho_hi],
         "site_rank_spearman_per_design": rhos,
@@ -295,8 +342,11 @@ def gate_anchor(model, n_top, n_bot, n_designs, k_bot, k_top, delta_ww,
               f"decap-sign {out['decap_sign_acc']:.2f}, "
               f"lin-err {out['autograd_linearity_medrelerr']:.1%}, "
               f"live {len(live)}/{len(ww)}")
+        print(f"      unit={unit}  majority-class baseline {majority:.3f} "
+              f"(base rate helps {base_rate:.3f}) -> lift "
+              f"{out['ww_sign_lift_over_majority']:+.3f}")
         if len(live) < 30:
-            print(f"      ! only {len(live)} live perturbations — most single-edge "
+            print(f"      ! only {len(live)} live perturbations — most {unit} "
                   f"moves fall under the {SIM_DELTA_FLOOR:.0e} relative floor here; "
                   f"raise --n-designs or --delta-ww before trusting this row")
     return out, rows
@@ -320,6 +370,13 @@ def main():
                          "cheap default (~25 s for 3 anchors)")
     ap.add_argument("--k-bot", type=int, default=12, help="bot strap edges perturbed")
     ap.add_argument("--k-top", type=int, default=6, help="top strap edges perturbed")
+    ap.add_argument("--perturb-unit", default="edge", choices=["edge", "strap"],
+                    help="'edge' = one strap segment (historical unit); "
+                         "'strap' = a full column strap, the unit a designer "
+                         "actually turns. Single-edge effect on global worst "
+                         "droop vanishes as the die grows (median 1.6e-4 at "
+                         "(4,7) but 2.4e-7 at (11,31)), so on large grids the "
+                         "edge unit measures physics no surrogate can resolve.")
     ap.add_argument("--k-frac", type=float, default=None,
                     help="test this FRACTION of each layer's edges instead "
                          "of the absolute --k-bot/--k-top, so ranking "
@@ -368,7 +425,7 @@ def main():
         nt, nb = (int(v) for v in a.split(","))
         res, _ = gate_anchor(model, nt, nb, args.n_designs, args.k_bot,
                              args.k_top, args.delta_ww, rng,
-                             k_frac=args.k_frac)
+                             k_frac=args.k_frac, unit=args.perturb_unit)
         results.append(res)
 
     print(f"\n{'anchor':>8} | {'sign (95% CI)':>20} | {'rank-rho (95% CI)':>24} | "

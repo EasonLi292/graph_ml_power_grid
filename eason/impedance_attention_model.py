@@ -39,6 +39,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from tools.impedance_factors import (invariant_channel_count,
+                                     invariant_channels)
+
 N_NODE_FEATURES = 10          # tools.impedance_factors.node_features
 
 
@@ -53,11 +56,13 @@ class ImpAttnConfig:
     content: bool = True      # ablation: content-only  (q.k)
     impedance: bool = True    # ablation: impedance-only (p.s)
     # --- nonlinear kernel score -------------------------------------
-    score: str = "bilinear"   # "bilinear" | "kernel"
+    score: str = "bilinear"   # "bilinear" | "kernel" | "dynamic_kernel"
     n_scales: int = 3         # learnable gammas per head
     kernel_feature: str = "rff"   # "rff" | "taylor"
     n_rff: int = 128          # random Fourier features per (head, scale)
     taylor_k: int = 2         # taylor only; unusable past gamma ~0.1 (see below)
+    # --- unified dynamic-impedance kernel ---------------------------
+    max_degree: int = 2       # polynomial degree in each invariant channel
 
 
 class ImpedanceAttention(nn.Module):
@@ -305,6 +310,121 @@ class KernelImpedanceAttention(ImpedanceAttention):
         return self.norm(hstate + self.out(out.reshape(N, H * self.cfg.d_v)))
 
 
+def _sym_square(a: torch.Tensor) -> torch.Tensor:
+    """Symmetric tensor square with <sym(a), sym(b)> == <a, b>**2 exactly.
+
+    Upper triangle only, off-diagonals weighted sqrt(2):
+        sum_{i<j} 2 a_i a_j b_i b_j + sum_i a_i^2 b_i^2 = (sum_i a_i b_i)^2
+    Width d(d+1)/2 instead of d^2, and it is still an inner product, so the
+    O(N) contraction is unaffected.
+    """
+    d = a.shape[-1]
+    iu, ju = torch.triu_indices(d, d, device=a.device)
+    w = torch.where(iu == ju, 1.0, np.sqrt(2.0)).to(a.dtype)
+    return a[..., iu] * a[..., ju] * w
+
+
+class DynamicKernelAttention(nn.Module):
+    """One unified multi-head dynamic-impedance kernel.
+
+        A_h(i<-j) = Phi_h(i) . Psi_h(j)
+                  = sum_{c,k} alpha_h[c,k] phi_h[c,k](i) psi_h[c,k](j) (z^c_ij)^k
+
+    ``c`` runs over the **basis-invariant** impedance channels — Z at DC and
+    Re Z / Im Z at each non-zero frequency — and ``k`` over polynomial
+    degrees up to ``cfg.max_degree``. There is no separate "DC kernel" and
+    no separate bilinear term: degree 1 at the DC channel *is* the old
+    bilinear score, degree 0 is a pure content score, and everything else is
+    new. Which combination a head uses is learned, not assigned.
+
+    Why invariant channels and not the raw ones. ``impedance_factors`` emits
+    (re,re), (im,im), (re,im), (im,re) per frequency, and those four are
+    **not** individually basis-invariant — measured at exact rank, rebuilding
+    from a different probe seed moves them by 0.19-0.76 relative while DC
+    moves by 1.4e-15. Only ``Re Z = rr - ii`` and ``Im Z = ri + ir`` are
+    stable. Any per-raw-channel gain therefore learns a quantity that is an
+    artifact of the probe draw. Regrouping first (``invariant_channels``)
+    costs width 2m per AC channel and fixes it.
+
+    Directionality: ``phi`` and ``psi`` are separate maps of the node
+    embedding, so A_h(i<-j) != A_h(j<-i) even though every underlying
+    impedance channel is reciprocal. No asymmetry is injected into the
+    physics.
+
+    Capacitance path: the AC channels depend on C, so d(score)/dC is
+    structurally non-zero — unlike the DC-only Gaussian kernel it replaces,
+    whose derivative to decap is exactly zero.
+
+    Factorization: every term is an inner product of per-node features, so
+    the Kronecker cache applies unchanged and no [N, N] tensor is built.
+    """
+
+    def __init__(self, cfg: ImpAttnConfig, dims: list[int]) -> None:
+        super().__init__()
+        self.cfg = cfg
+        h, H, K = cfg.hidden_dim, cfg.heads, cfg.max_degree
+        self.n_ch, self.K = len(dims), K
+        # feature width of each (channel, degree) block
+        widths = []
+        for d in dims:
+            for k in range(K + 1):
+                widths.append(1 if k == 0 else (d if k == 1 else d * (d + 1) // 2))
+        self.widths = widths
+        self.n_blocks = len(widths)
+        self.register_buffer(
+            "block_of", torch.repeat_interleave(
+                torch.arange(self.n_blocks), torch.tensor(widths)))
+        self.F = int(sum(widths))
+
+        self.phi = nn.Linear(h, H * self.n_blocks)   # receiver gains
+        self.psi = nn.Linear(h, H * self.n_blocks)   # sender gains
+        self.v = nn.Linear(h, H * cfg.d_v)
+        self.out = nn.Linear(H * cfg.d_v, h)
+        self.norm = nn.LayerNorm(h)
+
+        # Signed per-head mixture over (channel, degree). Heads get
+        # different initial scales purely to break symmetry — no head is
+        # assigned a physical role, and no diversity loss is applied.
+        scales = torch.logspace(-1.0, 0.0, H).view(H, 1)
+        self.alpha = nn.Parameter(
+            scales * torch.ones(H, self.n_blocks)
+            + 0.05 * torch.randn(H, self.n_blocks))
+        nn.init.zeros_(self.phi.weight); nn.init.ones_(self.phi.bias)
+        nn.init.zeros_(self.psi.weight); nn.init.ones_(self.psi.bias)
+
+    def _maps(self, hstate, chans):
+        """-> (Phi, Psi) [N, H, F] from invariant channel factor pairs."""
+        N, H = hstate.shape[0], self.cfg.heads
+        ua, ub = [], []
+        for (A, B, _) in chans:
+            for k in range(self.K + 1):
+                if k == 0:
+                    ua.append(A.new_ones(N, 1)); ub.append(B.new_ones(N, 1))
+                elif k == 1:
+                    ua.append(A); ub.append(B)
+                else:
+                    ua.append(_sym_square(A)); ub.append(_sym_square(B))
+        U = torch.cat(ua, -1)                                  # [N, F]
+        V = torch.cat(ub, -1)
+        gphi = self.phi(hstate).view(N, H, self.n_blocks) * self.alpha
+        gpsi = self.psi(hstate).view(N, H, self.n_blocks)
+        Phi = U.unsqueeze(1) * gphi[..., self.block_of]
+        Psi = V.unsqueeze(1) * gpsi[..., self.block_of]
+        return Phi, Psi
+
+    def forward(self, hstate, chans, naive: bool = False):
+        N, H = hstate.shape[0], self.cfg.heads
+        v = self.v(hstate).view(N, H, self.cfg.d_v)
+        Phi, Psi = self._maps(hstate, chans)
+        if naive:
+            score = torch.einsum("ihd,jhd->hij", Phi, Psi)     # TEST PATH ONLY
+            out = torch.einsum("hij,jhe->ihe", score, v)
+        else:
+            cache = torch.einsum("jhD,jhe->hDe", Psi, v)
+            out = torch.einsum("ihD,hDe->ihe", Phi, cache)
+        return self.norm(hstate + self.out(out.reshape(N, H * self.cfg.d_v)))
+
+
 class ImpedanceAttentionRegressor(nn.Module):
     """input MLP -> one global attention layer -> per-load decoder.
 
@@ -329,11 +449,23 @@ class ImpedanceAttentionRegressor(nn.Module):
         # monotone function of it leaves the per-observer ordering over
         # sources unchanged (measured). Letting phi/psi see z_ii and z_jj
         # is what allows the score to reorder at all.
+        n_selfz = (invariant_channel_count([0.0] + [1.0] * (cfg.n_freq - 1))
+                   if cfg.score == "dynamic_kernel" else n_ch)
         self.encoder = nn.Sequential(
-            nn.Linear(N_NODE_FEATURES + n_ch, h), nn.ReLU(), nn.Linear(h, h)
+            nn.Linear(N_NODE_FEATURES + n_selfz, h), nn.ReLU(), nn.Linear(h, h)
         )
-        self.attn = (KernelImpedanceAttention(cfg, n_ch)
-                     if cfg.score == "kernel" else ImpedanceAttention(cfg, n_ch))
+        # Invariant-channel layout: DC (width m) + Re/Im per non-zero
+        # frequency (width 2m each). Only used by the dynamic kernel.
+        self._omegas_layout = [0.0] + [1.0] * (cfg.n_freq - 1)
+        self.n_inv = invariant_channel_count(self._omegas_layout)
+        if cfg.score == "dynamic_kernel":
+            dims = ([cfg.m_factor]
+                    + [2 * cfg.m_factor] * (self.n_inv - 1))
+            self.attn = DynamicKernelAttention(cfg, dims)
+        elif cfg.score == "kernel":
+            self.attn = KernelImpedanceAttention(cfg, n_ch)
+        else:
+            self.attn = ImpedanceAttention(cfg, n_ch)
         self.decoder = nn.Sequential(nn.Linear(h, h), nn.ReLU(), nn.Linear(h, 1))
         self.target_space = target_space
         # Start at the mean-predictor baseline, not at random and not at
@@ -367,11 +499,37 @@ class ImpedanceAttentionRegressor(nn.Module):
         selfz = (p * s).sum(-1).abs().clamp_min(1e-30).log10()     # [N, n_ch]
         return self.encoder(torch.cat([x, selfz], -1)), p, s
 
+    def embed_invariant(self, x, p, s, n_elec: int):
+        """Dynamic-kernel embedding: regroup to invariant channels first.
+
+        Self-impedance here is A_i . B_i on the INVARIANT channels, not
+        (p*s) on the raw ones — the raw AC channels are probe-draw
+        artifacts (see DynamicKernelAttention).
+        """
+        # Normalise with a scale built from the DC channel only. The generic
+        # normalize_factors averages (p*s) over ALL raw channels, and the
+        # raw AC channels are not basis-invariant, so that scale itself
+        # varies with the probe draw and leaks non-invariance into every
+        # downstream feature (measured: 1.4e-3 model-output drift between
+        # two probe seeds at exact rank, versus 1e-15 for the channels).
+        if p.shape[0] > n_elec:
+            diag = (p[n_elec:, 0] * s[n_elec:, 0]).sum(-1).abs().mean().clamp_min(1e-30)
+            scale = diag.sqrt()
+            p, s = p / scale, s / scale
+        chans = invariant_channels(p, s, self._omegas_layout)
+        selfz = torch.stack([(A * B).sum(-1) for A, B, _ in chans], -1)
+        selfz = selfz.abs().clamp_min(1e-30).log10()
+        return self.encoder(torch.cat([x, selfz], -1)), chans
+
     def forward(self, x, p, s, n_elec: int, naive: bool = False, fdc=None):
         """x [N, F]; p, s [N, n_ch, m]; loads are rows [n_elec:].
 
         Returns one droop prediction per load node, shape [L].
         """
+        if self.cfg.score == "dynamic_kernel":
+            hstate, chans = self.embed_invariant(x, p, s, n_elec)
+            hstate = self.attn(hstate, chans, naive=naive)
+            return self.decoder(hstate[n_elec:]).squeeze(-1)
         hstate, p, s = self.embed(x, p, s, n_elec)
         if isinstance(self.attn, KernelImpedanceAttention):
             if fdc is not None:

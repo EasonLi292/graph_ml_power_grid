@@ -275,7 +275,11 @@ def main() -> None:
     ap.add_argument("--m-factor", type=int, default=16)
     ap.add_argument("--n-power", type=int, default=2)
     ap.add_argument("--score", default="bilinear",
-                    choices=["bilinear", "kernel"])
+                    choices=["bilinear", "kernel", "dynamic_kernel"])
+    ap.add_argument("--max-degree", type=int, default=2,
+                    help="dynamic_kernel: polynomial degree per invariant "
+                         "impedance channel (0=content only, 1=bilinear, "
+                         "2 adds the quadratic term)")
     ap.add_argument("--n-scales", type=int, default=3)
     ap.add_argument("--n-rff", type=int, default=128)
     ap.add_argument("--hidden-dim", type=int, default=64)
@@ -372,7 +376,8 @@ def main() -> None:
         m_factor=args.m_factor,
         content=args.ablation in ("combined", "content"),
         impedance=args.ablation in ("combined", "impedance"),
-        score=args.score, n_scales=args.n_scales, n_rff=args.n_rff)
+        score=args.score, n_scales=args.n_scales, n_rff=args.n_rff,
+        max_degree=args.max_degree)
     # start at the mean-predictor baseline (see model init docstring)
     ymask = np.isfinite(tr["y"]) & (tr["y"] > 0)
     init_bias = float(np.log10(np.maximum(tr["y"][ymask], LOG_FLOOR)).mean())

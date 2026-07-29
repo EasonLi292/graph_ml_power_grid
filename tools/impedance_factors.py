@@ -259,6 +259,52 @@ def impedance_factors(
     return torch.cat([p_e, p_l], 0), torch.cat([s_e, s_l], 0)
 
 
+def invariant_channels(p: torch.Tensor, s: torch.Tensor, omegas) -> list:
+    """Regroup the raw real channels into BASIS-INVARIANT factor pairs.
+
+    ``impedance_factors`` emits four real channels per non-zero frequency —
+    (re,re), (im,im), (re,im), (im,re) — and **the individual channels are
+    not basis-invariant**. Measured at exact rank (m = n_free) by rebuilding
+    the factors from a different random probe set: the DC channel agrees to
+    1.4e-15, but every AC channel differs by 0.19–0.76 relative. Only the
+    combinations that reconstruct the physical impedance are invariant:
+
+        Re Z = <p_re, s_re> - <p_im, s_im>
+        Im Z = <p_re, s_im> + <p_im, s_re>
+
+    Anything a model applies per-raw-channel (independent learned gains, a
+    per-channel nonlinearity) therefore operates on a quantity that changes
+    when the probe seed changes — it cannot transfer across grids at w > 0.
+
+    Each combination is still a single inner product, so factorized O(N)
+    evaluation is preserved, at width 2m instead of m:
+
+        Re Z_ij = <[p_re_i, p_im_i], [ s_re_j, -s_im_j]>
+        Im Z_ij = <[p_re_i, p_im_i], [ s_im_j,  s_re_j]>
+
+    Returns ``[(A, B, name), ...]`` with ``A, B`` of shape ``[N, d]`` and
+    ``A_i . B_j`` equal to that invariant channel.
+    """
+    out, c = [], 0
+    for f in range(len(omegas)):
+        if float(omegas[f]) == 0.0:
+            out.append((p[:, c], s[:, c], f"dc"))
+            c += 1
+        else:
+            p_re, p_im = p[:, c], p[:, c + 1]
+            s_re, s_im = s[:, c], s[:, c + 1]
+            A = torch.cat([p_re, p_im], dim=-1)
+            out.append((A, torch.cat([s_re, -s_im], -1), f"re_w{f}"))
+            out.append((A, torch.cat([s_im, s_re], -1), f"im_w{f}"))
+            c += 4
+    return out
+
+
+def invariant_channel_count(omegas) -> int:
+    """1 at DC + 2 (Re, Im) per non-zero frequency."""
+    return sum(1 if float(w) == 0.0 else 2 for w in omegas)
+
+
 def dc_symmetric_factor(sys_: BranchSystem, R: torch.Tensor, C: torch.Tensor,
                         m: int = 16, n_power: int = 2, seed: int = 0):
     """DC symmetric factor on the FULL node axis (loads = oriented difference).
