@@ -1,0 +1,66 @@
+train groups 600  val groups 50  families ['ww_edge', 'ww_section', 'ww_strap', 'ww_multi', 'ww_top_strap', 'decap_global', 'load_one', 'load_freq']
+factors (train)
+    25/600 groups, 221 rows (2s, 7 ms/row)
+    50/600 groups, 443 rows (3s, 7 ms/row)
+    75/600 groups, 662 rows (5s, 7 ms/row)
+    100/600 groups, 883 rows (6s, 7 ms/row)
+    125/600 groups, 1102 rows (7s, 7 ms/row)
+    150/600 groups, 1323 rows (9s, 7 ms/row)
+    175/600 groups, 1534 rows (23s, 15 ms/row)
+    200/600 groups, 1745 rows (36s, 21 ms/row)
+    225/600 groups, 1956 rows (48s, 25 ms/row)
+    250/600 groups, 2160 rows (60s, 28 ms/row)
+    275/600 groups, 2367 rows (72s, 30 ms/row)
+    300/600 groups, 2579 rows (84s, 33 ms/row)
+    325/600 groups, 2787 rows (88s, 31 ms/row)
+    350/600 groups, 2995 rows (91s, 30 ms/row)
+    375/600 groups, 3201 rows (94s, 29 ms/row)
+    400/600 groups, 3409 rows (97s, 28 ms/row)
+    425/600 groups, 3619 rows (100s, 28 ms/row)
+    450/600 groups, 3828 rows (103s, 27 ms/row)
+    475/600 groups, 4021 rows (137s, 34 ms/row)
+    500/600 groups, 4212 rows (172s, 41 ms/row)
+    525/600 groups, 4408 rows (203s, 46 ms/row)
+    550/600 groups, 4611 rows (231s, 50 ms/row)
+    575/600 groups, 4811 rows (255s, 53 ms/row)
+    600/600 groups, 5009 rows (278s, 55 ms/row)
+  cache -> datasets/paired_v1/_pfactors/tr_3x7-5x13-7x7-13x13_m16_q2_f3_rc1.pt
+factors (val)
+    25/50 groups, 196 rows (43s, 218 ms/row)
+    50/50 groups, 383 rows (82s, 214 ms/row)
+  cache -> datasets/paired_v1/_pfactors/va_7x19_n50_m16_q2_f3_rc1.pt
+score=dynamic_kernel params 34,101 init_bias -3.713  lambda_delta 1.0
+ep  1 loss 0.0619 dloss 0.00057 | val relerr 0.2915 | WIRE sign 0.688 (base 0.636, lift +0.052) rho +0.546 (231s)
+ep  2 loss 0.0068 dloss 0.00028 | val relerr 0.1742 | WIRE sign 0.704 (base 0.636, lift +0.068) rho +0.603 (258s)
+ep  3 loss 0.0047 dloss 0.00019 | val relerr 0.2836 | WIRE sign 0.705 (base 0.636, lift +0.069) rho +0.611 (225s)
+ep  4 loss 0.0049 dloss 0.00018 | val relerr 0.1627 | WIRE sign 0.711 (base 0.636, lift +0.075) rho +0.613 (231s)
+ep  5 loss 0.0041 dloss 0.00016 | val relerr 0.1990 | WIRE sign 0.715 (base 0.636, lift +0.079) rho +0.618 (254s)
+ep  6 loss 0.0024 dloss 0.00014 | val relerr 0.1913 | WIRE sign 0.719 (base 0.636, lift +0.083) rho +0.619 (253s)
+ep  7 loss 0.0019 dloss 0.00012 | val relerr 0.1678 | WIRE sign 0.716 (base 0.636, lift +0.080) rho +0.626 (267s)
+ep  8 loss 0.0031 dloss 0.00012 | val relerr 0.2322 | WIRE sign 0.714 (base 0.636, lift +0.078) rho +0.628 (269s)
+ep  9 loss 0.0015 dloss 0.00010 | val relerr 0.1204 | WIRE sign 0.708 (base 0.636, lift +0.072) rho +0.618 (253s)
+ep 10 loss 0.0015 dloss 0.00010 | val relerr 0.1399 | WIRE sign 0.712 (base 0.636, lift +0.076) rho +0.623 (188s)
+ep 11 loss 0.0019 dloss 0.00010 | val relerr 0.1791 | WIRE sign 0.712 (base 0.636, lift +0.076) rho +0.621 (190s)
+ep 12 loss 0.0010 dloss 0.00008 | val relerr 0.1229 | WIRE sign 0.712 (base 0.636, lift +0.076) rho +0.625 (179s)
+ep 13 loss 0.0008 dloss 0.00008 | val relerr 0.1264 | WIRE sign 0.710 (base 0.636, lift +0.074) rho +0.623 (180s)
+ep 14 loss 0.0008 dloss 0.00008 | val relerr 0.1366 | WIRE sign 0.713 (base 0.636, lift +0.077) rho +0.623 (174s)
+ep 15 loss 0.0006 dloss 0.00007 | val relerr 0.1056 | WIRE sign 0.710 (base 0.636, lift +0.074) rho +0.623 (180s)
+ep 16 loss 0.0005 dloss 0.00007 | val relerr 0.1057 | WIRE sign 0.713 (base 0.636, lift +0.077) rho +0.623 (180s)
+ep 17 loss 0.0005 dloss 0.00007 | val relerr 0.1104 | WIRE sign 0.712 (base 0.636, lift +0.077) rho +0.620 (296s)
+ep 18 loss 0.0004 dloss 0.00007 | val relerr 0.1094 | WIRE sign 0.713 (base 0.636, lift +0.077) rho +0.624 (210s)
+ep 19 loss 0.0004 dloss 0.00006 | val relerr 0.1129 | WIRE sign 0.712 (base 0.636, lift +0.076) rho +0.621 (225s)
+ep 20 loss 0.0004 dloss 0.00006 | val relerr 0.1079 | WIRE sign 0.712 (base 0.636, lift +0.076) rho +0.623 (246s)
+
+selected by WIRE sign lift over the majority baseline: +0.083
+
+per-family on val, final epoch:
+        family     n    sign  baseline    lift     rho  |d| mae
+  decap_global    50   0.988     1.000  -0.012  +0.050   0.0151
+     load_freq    50   0.926     0.945  -0.019  +0.091   0.0095
+      load_one    41   0.730     0.666  +0.064  +0.808   0.0011
+       ww_edge    21   0.640     0.643  -0.003  +0.416   0.0022
+      ww_multi    50   0.811     0.680  +0.131  +0.855   0.0076
+    ww_section    33   0.676     0.665  +0.012  +0.593   0.0031
+      ww_strap    41   0.709     0.605  +0.103  +0.681   0.0036
+  ww_top_strap    47   0.724     0.587  +0.137  +0.573   0.0063
+history -> checkpoints/paired_dyn_s0.history.json

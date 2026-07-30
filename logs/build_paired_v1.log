@@ -1,0 +1,34 @@
+anchors 14; splits by whole topology family
+      (3, 7) -> train
+      (4, 7) -> test
+     (5, 13) -> train
+      (7, 7) -> train
+     (7, 13) -> test
+     (7, 19) -> val
+     (9, 25) -> train
+    (10, 19) -> val
+    (11, 31) -> test
+    (13, 13) -> train
+    (13, 25) -> train
+    (19, 19) -> val
+    (25, 25) -> train
+    (31, 31) -> test
+
+16200 simulations (1800 bases, 14400 perturbations) queued in 5s
+simulating on 3 workers...
+  done in 473s (29 ms/sim)
+  dropped 2379 near-zero-effect pairs to cap their share at 15% per (anchor, family)
+  train: 8208 rows (1050 bases)
+  val: 3377 rows (450 bases)
+  test: 2236 rows (300 bases)
+
+wrote datasets/paired_v1/pairs.h5 (13.8 MB)
+
+coverage (perturbations only)
+              split: test=1936 (16%)  train=7158 (60%)  val=2927 (24%)
+             family: decap_global=1800 (15%)  load_freq=1800 (15%)  load_one=1488 (12%)  ww_edge=783 (7%)  ww_multi=1774 (15%)  ww_section=1204 (10%)  ww_strap=1467 (12%)  ww_top_strap=1705 (14%)
+           locality: global=3975 (33%)  local=4581 (38%)  regional=3465 (29%)
+        effect sign: better=5552 (46%)  flat=32 (0%)  worse=6437 (54%)
+   effect magnitude: 1e-3..1e-2=3061 (25%)  1e-4..1e-3=2114 (18%)  <1e-4=1334 (11%)  >1e-2=5512 (46%)
+
+  per (anchor, family) minimum count: 14
