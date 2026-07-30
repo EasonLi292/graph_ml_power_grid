@@ -212,6 +212,11 @@ def main():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--ckpt", type=Path, default=Path("checkpoints/paired.pt"))
     ap.add_argument("--cache-dir", type=Path, default=None)
+    ap.add_argument("--max-train-groups", type=int, default=None)
+    ap.add_argument("--max-val-groups", type=int, default=None,
+                    help="cap val groups: the n_bot=19 val anchors cost "
+                         "500-1000 ms/row of factors, so a full val cache is "
+                         "~47 min. A capped val is enough for a pilot.")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -224,15 +229,22 @@ def main():
 
     tr_g, fams = load_pairs(args.data, "train", anc)
     va_g, _ = load_pairs(args.data, "val", vanc)
+    if args.max_train_groups:
+        tr_g = tr_g[:args.max_train_groups]
+    if args.max_val_groups:
+        va_g = va_g[:args.max_val_groups]
     print(f"train groups {len(tr_g)}  val groups {len(va_g)}  families {fams}")
     ac = Anchors(om, args.m_factor, args.n_power, args.local_rc)
-    tag = "tr_" + "-".join(f"{a}x{b}" for a, b in sorted(anc))
+    tag = ("tr_" + "-".join(f"{a}x{b}" for a, b in sorted(anc))
+           + (f"_n{args.max_train_groups}" if args.max_train_groups else ""))
     print("factors (train)")
     tr = build_cache(tr_g, ac, tag, cache_dir)
     print("factors (val)")
-    va = build_cache(va_g, ac, "va_all" if vanc is None else
-                     "va_" + "-".join(f"{a}x{b}" for a, b in sorted(vanc)),
-                     cache_dir)
+    vtag = ("va_all" if vanc is None else
+            "va_" + "-".join(f"{a}x{b}" for a, b in sorted(vanc)))
+    if args.max_val_groups:
+        vtag += f"_n{args.max_val_groups}"
+    va = build_cache(va_g, ac, vtag, cache_dir)
 
     cfg = ImpAttnConfig(score=args.score, n_freq=args.n_freq,
                         m_factor=args.m_factor, local_rc=args.local_rc)
