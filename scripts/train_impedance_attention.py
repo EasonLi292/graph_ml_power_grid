@@ -183,13 +183,18 @@ def filter_anchors(data, anchors, keep: bool):
 
 def build_cache(data, ac, omegas, m, n_power, tag, cache_dir: Path | None,
                 want_fdc: bool = False):
-    """Precompute (p, s) per sample. Cached to disk keyed by config."""
-    # channel count is part of the key: the AC-channel fix changed the layout
-    # and a stale cache would load silently with the wrong shape
-    from tools.impedance_factors import channel_count
-    key = (f"{tag}_m{m}_q{n_power}_f{omegas.numel()}"
-           f"_c{channel_count(omegas)}{'_fdc' if want_fdc else ''}")
-    path = cache_dir / f"{key}.pt" if cache_dir else None
+    """Precompute (p, s) per sample. Cached to disk keyed by config.
+
+    The key comes from ``tools.factor_cache.FactorSpec``, which hashes EVERY
+    input that changes the factors — including the probe seed and the actual
+    frequency values. The old key omitted both, so two different frequency
+    grids of the same length hashed identically and a run could silently
+    load factors built for the other grid.
+    """
+    from tools.factor_cache import FactorSpec
+    spec = FactorSpec(omegas=omegas, m=m, n_power=n_power, seed=0,
+                      proj="hermitian", with_fdc=want_fdc)
+    path = spec.path(cache_dir, tag)
     if path is not None and path.exists():
         print(f"  factors <- {path}")
         return torch.load(path, weights_only=False)

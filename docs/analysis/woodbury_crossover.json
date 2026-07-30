@@ -1,0 +1,319 @@
+{
+  "anchors": [
+    {
+      "anchor": [
+        3,
+        7
+      ],
+      "n_free": 55,
+      "refactor_default_ms": 13.332596980035305,
+      "refactor_lu_ms": 16.338291733215254,
+      "update_ms": 18.22302754347523,
+      "simulator_ms": 13.68183339945972
+    },
+    {
+      "anchor": [
+        7,
+        13
+      ],
+      "n_free": 211,
+      "refactor_default_ms": 81.03080559521914,
+      "refactor_lu_ms": 46.47926411901911,
+      "update_ms": 36.51711096366247,
+      "simulator_ms": 19.798562629148364
+    },
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "n_free": 325,
+      "refactor_default_ms": 143.23505526408553,
+      "refactor_lu_ms": 94.29486111427347,
+      "update_ms": 65.92137490709622,
+      "simulator_ms": 28.86462491005659
+    },
+    {
+      "anchor": [
+        19,
+        19
+      ],
+      "n_free": 703,
+      "refactor_default_ms": 767.8747639680902,
+      "refactor_lu_ms": 254.52274999891716,
+      "update_ms": 157.0896526488165,
+      "simulator_ms": 49.426208483055234
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "n_free": 1225,
+      "refactor_default_ms": 2564.34380573531,
+      "refactor_lu_ms": 669.3310140011212,
+      "update_ms": 261.3089027193685,
+      "simulator_ms": 90.8164584543556
+    }
+  ],
+  "rank_sweep": [
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "rank": 1,
+      "refactor_lu_ms": 73.82545837511618,
+      "update_ms": 53.18883325283726,
+      "speedup": 1.387987926416455
+    },
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "rank": 2,
+      "refactor_lu_ms": 83.27924987922113,
+      "update_ms": 63.25945832456152,
+      "speedup": 1.3164711188632894
+    },
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "rank": 4,
+      "refactor_lu_ms": 75.34252805635333,
+      "update_ms": 60.022264098127685,
+      "speedup": 1.2552430200430167
+    },
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "rank": 8,
+      "refactor_lu_ms": 78.45170826961596,
+      "update_ms": 54.001139011234045,
+      "speedup": 1.4527787692273562
+    },
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "rank": 16,
+      "refactor_lu_ms": 72.91327758381765,
+      "update_ms": 52.04963870346546,
+      "speedup": 1.4008411854540517
+    },
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "rank": 32,
+      "refactor_lu_ms": 78.14597229783733,
+      "update_ms": 63.26980562880635,
+      "speedup": 1.2351226864249754
+    },
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "rank": 64,
+      "refactor_lu_ms": 66.06776391466458,
+      "update_ms": 77.50001394500335,
+      "speedup": 0.8524871229255329
+    },
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "rank": 128,
+      "refactor_lu_ms": 72.31193066885074,
+      "update_ms": 100.95940266425411,
+      "speedup": 0.7162476080541792
+    },
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "rank": 256,
+      "refactor_lu_ms": 71.26805527756612,
+      "update_ms": 228.6387359102567,
+      "speedup": 0.3117059539094882
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "rank": 1,
+      "refactor_lu_ms": 646.9143750146031,
+      "update_ms": 268.33938900381327,
+      "speedup": 2.410806618499866
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "rank": 2,
+      "refactor_lu_ms": 659.2259999985496,
+      "update_ms": 257.94697226956487,
+      "speedup": 2.5556648104775275
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "rank": 4,
+      "refactor_lu_ms": 652.440222290655,
+      "update_ms": 262.31497231250006,
+      "speedup": 2.4872397352652538
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "rank": 8,
+      "refactor_lu_ms": 673.7944303701321,
+      "update_ms": 284.79579153160256,
+      "speedup": 2.3658861907563127
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "rank": 16,
+      "refactor_lu_ms": 670.9711947478354,
+      "update_ms": 269.02218038837117,
+      "speedup": 2.494111057233997
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "rank": 32,
+      "refactor_lu_ms": 674.3333193783959,
+      "update_ms": 264.79506958276033,
+      "speedup": 2.546623396126477
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "rank": 64,
+      "refactor_lu_ms": 686.0206802375615,
+      "update_ms": 279.31469477092224,
+      "speedup": 2.4560851723186135
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "rank": 128,
+      "refactor_lu_ms": 649.854291540881,
+      "update_ms": 308.74131930371124,
+      "speedup": 2.1048504068275173
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "rank": 256,
+      "refactor_lu_ms": 689.147694191585,
+      "update_ms": 485.76724994927645,
+      "speedup": 1.4186787896128144
+    }
+  ],
+  "freq_sweep": [
+    {
+      "n_freq": 1,
+      "refactor_lu_ms": 18.368569668382406,
+      "update_ms": 11.853444389998913,
+      "speedup": 1.549639840035061
+    },
+    {
+      "n_freq": 2,
+      "refactor_lu_ms": 43.088111095130444,
+      "update_ms": 39.43623602390289,
+      "speedup": 1.0926020188390722
+    },
+    {
+      "n_freq": 3,
+      "refactor_lu_ms": 73.77447203422587,
+      "update_ms": 48.96051390096545,
+      "speedup": 1.5068157205917545
+    },
+    {
+      "n_freq": 5,
+      "refactor_lu_ms": 105.84422200918198,
+      "update_ms": 92.91261093070109,
+      "speedup": 1.1391803647421546
+    }
+  ],
+  "group_cache": [
+    {
+      "anchor": [
+        7,
+        13
+      ],
+      "n_free": 211,
+      "refactor_ms": 124.01502043940127,
+      "update_ms": 95.80158349126577,
+      "speedup": 1.2944986493955781,
+      "k_perturbations": 8
+    },
+    {
+      "anchor": [
+        13,
+        13
+      ],
+      "n_free": 325,
+      "refactor_ms": 291.6217085439712,
+      "update_ms": 174.21045852825046,
+      "speedup": 1.673962120343544,
+      "k_perturbations": 8
+    },
+    {
+      "anchor": [
+        19,
+        19
+      ],
+      "n_free": 703,
+      "refactor_ms": 1505.7179580908269,
+      "update_ms": 614.7176874801517,
+      "speedup": 2.4494462885280885,
+      "k_perturbations": 8
+    },
+    {
+      "anchor": [
+        25,
+        25
+      ],
+      "n_free": 1225,
+      "refactor_ms": 4990.512708667666,
+      "update_ms": 2152.489229105413,
+      "speedup": 2.3184844045615742,
+      "k_perturbations": 8
+    }
+  ],
+  "crossover_by_anchor": {
+    "13,13": 64,
+    "25,25": null
+  },
+  "recommended_max_rank": 32,
+  "note": "recommended_max_rank is half the smallest MEASURED crossover rank, so the guard trips before the update becomes the slower option rather than at the exact break-even point"
+}

@@ -147,7 +147,7 @@ def admittance(sys_: BranchSystem, R: torch.Tensor, C: torch.Tensor,
 
 
 def _subspace_factors(Y: torch.Tensor, probes: torch.Tensor, n_power: int,
-                      proj: str = "hermitian"):
+                      proj: str = "hermitian", solve=None):
     """Randomized subspace iteration -> (p, s) with ``p_i^T s_j ~= Z_ij``.
 
     Galerkin projection onto ``range(Qr)``: ``Z ~= Qr (Qr^H Z Qr) Qr^H``.
@@ -159,13 +159,23 @@ def _subspace_factors(Y: torch.Tensor, probes: torch.Tensor, n_power: int,
     staying exact at DC, where ``Y`` is real. Note ``p^T s`` below uses a
     plain transpose by construction: the conjugation lives in ``s``.
 
+    ``solve`` overrides how ``Z B`` is applied. It is the ONLY place ``Y``
+    is touched, which is what lets an incremental Woodbury update
+    (``tools/incremental_impedance``) stand in for a refactorization without
+    any change here. When it is ``None`` the original dense path runs
+    unchanged.
+
     Returns factors over FREE nodes only, shape ``[n_free, m]`` each.
     """
-    X = torch.linalg.solve(Y, probes.to(Y.dtype))
+    if solve is None:
+        def solve(B):
+            return torch.linalg.solve(Y, B.to(Y.dtype))
+
+    X = solve(probes)
     for _ in range(n_power):
-        X = torch.linalg.solve(Y, X)
+        X = solve(X)
     Qr, _ = torch.linalg.qr(X)
-    ZQ = torch.linalg.solve(Y, Qr)
+    ZQ = solve(Qr)
 
     if proj == "complex_sym":
         # Bilinear-form projection: T_s = Qr^T Z Qr is SYMMETRIC whenever Z
@@ -191,7 +201,8 @@ def _subspace_factors(Y: torch.Tensor, probes: torch.Tensor, n_power: int,
     return p, s, T
 
 
-def symmetric_factor(Y: torch.Tensor, probes: torch.Tensor, n_power: int):
+def symmetric_factor(Y: torch.Tensor, probes: torch.Tensor, n_power: int,
+                     solve=None):
     """Symmetric factor ``F`` with ``F_i . F_j ~= Z_ij`` for real SPD ``Y``.
 
     The asymmetric ``(p, s)`` pair reconstructs ``Z`` but does not make
@@ -204,16 +215,16 @@ def symmetric_factor(Y: torch.Tensor, probes: torch.Tensor, n_power: int):
 
     Real DC only — at ``w > 0`` ``T`` is complex symmetric, not PSD, and
     has no real square root.
+
+    ``p`` from the hermitian projection IS ``Qr``, so it is reused here
+    rather than repeating the subspace iteration — same value, and it drops
+    ``n_power + 1`` redundant solves that the earlier version paid twice.
     """
-    _, _, T = _subspace_factors(Y, probes, n_power)
+    Qr, _, T = _subspace_factors(Y, probes, n_power, solve=solve)
     Tr = T.real if T.is_complex() else T
     Tr = 0.5 * (Tr + Tr.transpose(-2, -1))
     evals, evecs = torch.linalg.eigh(Tr)
     root = evecs @ torch.diag_embed(evals.clamp_min(0).sqrt()) @ evecs.transpose(-2, -1)
-    X = torch.linalg.solve(Y, probes.to(Y.dtype))
-    for _ in range(n_power):
-        X = torch.linalg.solve(Y, X)
-    Qr, _ = torch.linalg.qr(X)
     return (Qr.real if Qr.is_complex() else Qr) @ root
 
 
@@ -243,6 +254,7 @@ def impedance_factors(
     L: torch.Tensor | None = None,
     seed: int = 0,
     proj: str = "hermitian",
+    solvers=None,
 ):
     """Per-frequency observer/source factors on the FULL node axis.
 
@@ -251,6 +263,13 @@ def impedance_factors(
     non-zero frequency (the (re,re), (im,im), (re,im), (im,re) pairings
     needed to span both ``Re Z`` and ``Im Z``). Load-node factors are the
     oriented terminal difference; clamped pads are zero.
+
+    ``solvers`` is an optional list of per-frequency
+    :class:`~tools.incremental_impedance.SolveOp`. Supplying it replaces the
+    dense ``Y`` build and its factorization with whatever the operator does
+    — a Woodbury update against an immutable base, in practice. The rest of
+    the construction, and therefore the invariant channels, the Frobenius
+    normalization and the dynamic kernel downstream, is untouched.
     """
     dev, dt = R.device, R.dtype
     gen = torch.Generator(device="cpu").manual_seed(seed)
@@ -259,8 +278,12 @@ def impedance_factors(
 
     p_ch, s_ch = [], []
     for f in range(omegas.shape[0]):
-        Y = admittance(sys_, R, C, omegas[f], L)
-        pf, sf, _ = _subspace_factors(Y, probes, n_power, proj=proj)
+        if solvers is None:
+            Y = admittance(sys_, R, C, omegas[f], L)
+            pf, sf, _ = _subspace_factors(Y, probes, n_power, proj=proj)
+        else:
+            pf, sf, _ = _subspace_factors(None, probes, n_power, proj=proj,
+                                          solve=solvers[f].solve)
         if float(omegas[f]) == 0.0:
             p_ch += [pf.real]
             s_ch += [sf.real]
@@ -357,19 +380,27 @@ def invariant_channel_count(omegas) -> int:
 
 
 def dc_symmetric_factor(sys_: BranchSystem, R: torch.Tensor, C: torch.Tensor,
-                        m: int = 16, n_power: int = 2, seed: int = 0):
+                        m: int = 16, n_power: int = 2, seed: int = 0,
+                        solver=None):
     """DC symmetric factor on the FULL node axis (loads = oriented difference).
 
     ``F_i . F_j ~= Z_ij`` and ``||F_i - F_j||^2 ~= R_eff(i, j)``, so a
     Gaussian kernel of this distance can be approximated by random Fourier
     features. Clamped pads are zero, as elsewhere.
+
+    ``solver`` must be the **DC** operator when supplied; capacitance does
+    not enter ``Y`` at ``w = 0``, so a decap proposal leaves this factor
+    identical to the base by construction.
     """
     dev, dt = R.device, R.dtype
     gen = torch.Generator(device="cpu").manual_seed(seed)
     probes = torch.randn(sys_.n_free, m, generator=gen,
                          dtype=torch.float64).to(device=dev, dtype=dt)
-    Y = admittance(sys_, R, C, torch.zeros((), dtype=dt, device=dev))
-    F = symmetric_factor(Y, probes, n_power).to(dt)
+    if solver is None:
+        Y = admittance(sys_, R, C, torch.zeros((), dtype=dt, device=dev))
+        F = symmetric_factor(Y, probes, n_power).to(dt)
+    else:
+        F = symmetric_factor(None, probes, n_power, solve=solver.solve).to(dt)
     out = F.new_zeros((sys_.n_elec, F.shape[1]))
     live = sys_.free_of >= 0
     out[live] = F[sys_.free_of[live]]

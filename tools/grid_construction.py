@@ -189,6 +189,21 @@ class PDNGraph:
     R_top_edges: np.ndarray | None = None
     R_bot_edges: np.ndarray | None = None
 
+    # Optional PER-SITE decap capacitance, index-aligned with
+    # ``decap_pairs``. ``None`` ⇒ the scalar ``C_decap`` everywhere. A site
+    # holding **zero** capacitance is electrically identical to no capacitor
+    # at all, which is what makes "add a decap here" and "remove that decap"
+    # ordinary value changes on a FIXED site set rather than topology edits —
+    # and therefore rank-1 updates rather than refactorizations.
+    C_decap_sites: np.ndarray | None = None
+
+    @property
+    def decap_C(self) -> np.ndarray:
+        """Per-site capacitance, broadcasting the scalar when unset."""
+        if self.C_decap_sites is None:
+            return np.full(self.n_decaps, float(self.C_decap), dtype=float)
+        return np.asarray(self.C_decap_sites, dtype=float)
+
     @property
     def n_top_nodes(self) -> int:
         return self.n_top * self.n_top
@@ -320,6 +335,7 @@ def build_regular_pdn(
     loads: np.ndarray | None = None,
     ww_top_edges: np.ndarray | None = None,
     ww_bot_edges: np.ndarray | None = None,
+    C_decap_sites: np.ndarray | None = None,
 ) -> PDNGraph:
     """Build the two-rail PDN graph.
 
@@ -409,6 +425,18 @@ def build_regular_pdn(
         n_bot, bot_pat, LOAD_ROW_STRIDE, LOAD_ROW_OFFSET
     )
 
+    C_sites = None
+    if C_decap_sites is not None:
+        C_sites = np.asarray(C_decap_sites, dtype=float)
+        if C_sites.shape != (decap_pairs.shape[0],):
+            raise ValueError(
+                f"C_decap_sites length {C_sites.shape} != "
+                f"#decap sites {decap_pairs.shape[0]}"
+            )
+        if np.any(C_sites < 0):
+            raise ValueError("C_decap_sites must be non-negative "
+                             "(zero means an empty decap slot)")
+
     n_loads = load_pairs.shape[0]
     if loads is None:
         loads_arr = np.tile(
@@ -449,6 +477,7 @@ def build_regular_pdn(
         bot_pos=bot_pos,
         R_top_edges=R_top_edges,
         R_bot_edges=R_bot_edges,
+        C_decap_sites=C_sites,
     )
 
 

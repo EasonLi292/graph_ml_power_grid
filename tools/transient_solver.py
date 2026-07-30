@@ -80,9 +80,10 @@ def _stamp_decap_companion(g: PDNGraph, bot0: int, dt: float):
     rows: list[int] = []
     cols: list[int] = []
     vals: list[float] = []
-    g_c = g.C_decap / dt
-    for u, v in g.decap_pairs:
+    g_c_sites = g.decap_C / dt        # per site; a zero site stamps nothing
+    for k, (u, v) in enumerate(g.decap_pairs):
         a, b = bot0 + int(u), bot0 + int(v)
+        g_c = float(g_c_sites[k])
         rows.extend([a, b, a, b])
         cols.extend([a, b, b, a])
         vals.extend([g_c, g_c, -g_c, -g_c])
@@ -176,7 +177,7 @@ def simulate(g: PDNGraph, t_end: float = 5e-9, dt: float = 1e-11) -> dict:
     else:
         dec_vdd_idx = np.empty(0, dtype=int)
         dec_vss_idx = np.empty(0, dtype=int)
-    g_c = g.C_decap / dt
+    g_c = g.decap_C / dt          # [n_decaps], broadcast against dV_prev
 
     I = np.zeros(N)
     for step in range(1, n_steps + 1):

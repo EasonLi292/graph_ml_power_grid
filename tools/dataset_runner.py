@@ -78,9 +78,13 @@ def run_one(p: dict, keep_full_traj: bool = False, cfg: SimConfig | None = None)
         loads=p.get("loads"),
         ww_top_edges=p.get("ww_top_edges"),
         ww_bot_edges=p.get("ww_bot_edges"),
+        C_decap_sites=p.get("C_decap_sites"),
     )
 
-    warmup_periods = _warmup_periods(g.R_bot, p["C_decap"], period, cfg)
+    # Warmup is sized off the SLOWEST site, not the nominal scalar, so a
+    # redistribution that concentrates capacitance still settles.
+    C_tau = float(g.decap_C.max()) if g.n_decaps else float(p["C_decap"])
+    warmup_periods = _warmup_periods(g.R_bot, C_tau, period, cfg)
     n_periods = warmup_periods + cfg.measure_periods
     t_end = period * n_periods
 
